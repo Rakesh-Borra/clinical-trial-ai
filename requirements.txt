@@ -1,0 +1,6 @@
+streamlit
+ollama
+pymupdf
+pydantic
+python-dotenv
+pytest

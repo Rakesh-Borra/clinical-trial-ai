@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Local databases
+*.db
+*.sqlite3
+
+# Clinical trial documents and generated outputs
+data/protocols/*
+data/outputs/*
+!data/protocols/.gitkeep
+!data/outputs/.gitkeep
