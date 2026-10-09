@@ -24,9 +24,9 @@ Python 3.12, Streamlit, Ollama, PyMuPDF, Pydantic, SQLite, pytest.
 Prototype for educational use only. No real patient data. AI output requires qualified human review and does not replace clinical advice or informed consent.
 
 ## Team
-- Team Lead: Backend, AI agents, integration, testing.
-- Contributor 1: Sample protocols, evaluation, documentation.
-- Contributor 2: User interface, usability testing, presentation support.
+- **Rakesh — Team Lead:** AI agents, backend development, integration, and testing.
+- **Raj — Contributor:** Sample clinical trial protocols, evaluation, testing, and documentation.
+- **Nam — Contributor:** Streamlit user interface, patient portal, and usability testing.
 
 ## Project Status
 Initial repository setup complete. Implementation in progress.
