@@ -38,8 +38,8 @@ def test_protocol_pdf_pipeline():
 
         result = analyze_protocol_pdf("test_protocol.pdf")
 
-        assert result.trial_title == "Diabetes Study"
-
+        assert result["analysis"].trial_title == "Diabetes Study"
+        assert isinstance(result["verification"], list)
         text_sent_to_agent = mock_agent.call_args.args[0]
 
         assert "[SOURCE PAGE 1]" in text_sent_to_agent

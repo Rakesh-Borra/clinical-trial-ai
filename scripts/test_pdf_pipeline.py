@@ -48,7 +48,12 @@ document.close()
 print(f"Created synthetic protocol PDF: {pdf_path}")
 
 # Run our complete clinical trial analysis pipeline
-analysis = analyze_protocol_pdf(str(pdf_path))
+import json
+
+result = analyze_protocol_pdf(str(pdf_path))
 
 print("\n=== PDF PROTOCOL ANALYSIS ===\n")
-print(analysis.model_dump_json(indent=2))
+print(result["analysis"].model_dump_json(indent=2))
+
+print("\n=== SOURCE VERIFICATION ===\n")
+print(json.dumps(result["verification"], indent=2))
