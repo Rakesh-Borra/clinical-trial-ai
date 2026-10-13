@@ -250,8 +250,8 @@ def test_pipeline_source_markers_and_warnings_for_mixed_pdf(tmp_path):
         "services.pdf_processor._ocr_pdf_page",
         return_value="LAB THRESHOLDS: Fasting glucose 126 mg/dL or higher.",
     ), patch(
-        "services.protocol_pipeline.analyze_protocol",
-        return_value=mock_analysis,
+        "services.protocol_pipeline.analyze_protocol_with_rescue",
+        return_value=(mock_analysis, []),
     ) as mock_agent:
         result = analyze_protocol_pdf(str(pdf_path))
 
