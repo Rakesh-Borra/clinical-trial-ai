@@ -4,3 +4,5 @@ pymupdf
 pydantic
 python-dotenv
 pytest
+pytesseract
+Pillow

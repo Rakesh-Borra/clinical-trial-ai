@@ -20,6 +20,38 @@ Upload Protocol → Analyze → Generate Summary → Verify → Coordinator Appr
 ## Technology
 Python 3.12, Streamlit, Ollama, PyMuPDF, Pydantic, SQLite, pytest.
 
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### OCR fallback (scanned PDFs)
+
+Selectable-text PDFs work with PyMuPDF alone. Pages with no extractable
+text are rendered and processed with local OCR (pytesseract + Tesseract).
+
+1. Install Python OCR packages (included in `requirements.txt`):
+
+```bash
+pip install pytesseract Pillow
+```
+
+2. Install the Tesseract binary on your machine:
+
+```bash
+# macOS
+brew install tesseract
+
+# Debian/Ubuntu
+sudo apt-get install tesseract-ocr
+```
+
+If Tesseract or the Python OCR packages are missing, scanned pages stay
+empty and a clear warning is recorded. The extractor never invents text.
+
 ## Safety
 Prototype for educational use only. No real patient data. AI output requires qualified human review and does not replace clinical advice or informed consent.
 
