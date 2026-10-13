@@ -162,6 +162,18 @@ def test_exclusion_visits_procedures_safety_and_overview():
     assert visits.intent == "visits"
     assert "Day 0" in visits.answer_text
     assert "Day 30" in visits.answer_text
+    assert "2 distinct scheduled visits" not in visits.answer_text
+
+    visit_count = answer_patient_query(
+        "How many visits will I have?",
+        analysis,
+        verification,
+    )
+    assert visit_count.intent == "visits"
+    assert "2 distinct scheduled visits" in visit_count.answer_text
+    assert "Day 0" in visit_count.answer_text
+    assert "Day 30" in visit_count.answer_text
+    assert all(c.verification_status == "exact_match" for c in visit_count.citations)
 
     procedures = answer_patient_query(
         "What procedures will happen?",
