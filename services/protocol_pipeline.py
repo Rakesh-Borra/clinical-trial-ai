@@ -24,9 +24,17 @@ def analyze_protocol_pdf(file_path: str):
             )
 
     if not protocol_pages:
+        warning_detail = ""
+        extraction_warnings = pdf_result.get("warnings") or []
+        if extraction_warnings:
+            warning_detail = (
+                " Extraction warnings: "
+                + "; ".join(extraction_warnings)
+            )
         raise ValueError(
-            "The protocol PDF contains no extractable text. "
-            "OCR may be required."
+            "The protocol PDF contains no extractable text "
+            "after selectable-text extraction and OCR fallback."
+            + warning_detail
         )
 
     # Step 3: Combine all pages
@@ -44,4 +52,5 @@ def analyze_protocol_pdf(file_path: str):
     return {
         "analysis": analysis,
         "verification": verification,
+        "extraction_warnings": list(pdf_result.get("warnings") or []),
     }
