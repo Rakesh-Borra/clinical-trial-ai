@@ -105,6 +105,47 @@ def _matches_any(query: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pattern, normalized) for pattern in patterns)
 
 
+_VISIT_COUNT_PATTERNS = (
+    r"\bhow many visits\b",
+    r"\bhow many study visits\b",
+    r"\bhow many (scheduled |study )?visits are there\b",
+    r"\bnumber of (scheduled |study )?visits\b",
+    r"\bvisit count\b",
+    r"\bcount of (the )?visits\b",
+)
+
+
+def is_visit_count_query(query: str) -> bool:
+    """True when the user is asking for a visit count, not only the schedule."""
+    return _matches_any(query, _VISIT_COUNT_PATTERNS)
+
+
+def distinct_scheduled_visit_names(analysis: ProtocolAnalysis) -> list[str]:
+    """Return distinct visit names from analysis, preserving first-seen order."""
+    seen: set[str] = set()
+    names: list[str] = []
+    for visit in analysis.visits:
+        key = normalize_text(visit.visit_name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        names.append(visit.visit_name)
+    return names
+
+
+def _distinct_visits_fully_verified(
+    analysis: ProtocolAnalysis,
+    verification: Sequence[dict],
+) -> bool:
+    names = distinct_scheduled_visit_names(analysis)
+    if not names:
+        return False
+    index = _verification_index(verification)
+    return all(
+        _status_for(index, "visits", name) == _VERIFIED_STATUS for name in names
+    )
+
+
 def classify_coordinator_intent(query: str) -> str:
     """Classify coordinator intent with deterministic keyword rules."""
     if _matches_any(query, _MEDICAL_ADVICE_PATTERNS):
@@ -304,6 +345,7 @@ def _build_lookup_answer(
     category_label: str,
     citations: List[CoordinatorCitation],
     accuracy_warnings: Optional[Sequence[str]],
+    preface_override: Optional[str] = None,
 ) -> CoordinatorAnswer:
     verified, unverified = _split_verified(citations)
     limitations: list[str] = []
@@ -312,11 +354,14 @@ def _build_lookup_answer(
     )
 
     if not citations:
+        missing_text = (
+            f"No {category_label} were found in the extracted protocol "
+            "analysis. No clinical facts were invented."
+        )
+        if preface_override:
+            missing_text = preface_override
         return CoordinatorAnswer(
-            answer_text=(
-                f"No {category_label} were found in the extracted protocol "
-                "analysis. No clinical facts were invented."
-            ),
+            answer_text=missing_text,
             intent=intent,
             citations=[],
             confidence="unavailable",
@@ -332,10 +377,13 @@ def _build_lookup_answer(
 
     if verified and not unverified:
         confidence = "high"
-        preface = f"Verified {category_label} from the protocol analysis:"
+        preface = (
+            preface_override
+            or f"Verified {category_label} from the protocol analysis:"
+        )
     elif verified and unverified:
         confidence = "partial"
-        preface = (
+        preface = preface_override or (
             f"Verified {category_label} from the protocol analysis "
             "(additional unverified items are listed in limitations):"
         )
@@ -349,7 +397,7 @@ def _build_lookup_answer(
             )
     else:
         confidence = "partial"
-        preface = (
+        preface = preface_override or (
             f"{category_label.capitalize()} were found but none had "
             f"{_VERIFIED_STATUS} verification. Treat as unverified:"
         )
@@ -368,6 +416,59 @@ def _build_lookup_answer(
         confidence=confidence,
         limitations=limitations,
         disclaimers=list(_DEFAULT_DISCLAIMERS),
+    )
+
+
+def build_visit_count_preface(
+    analysis: ProtocolAnalysis,
+    verification: Sequence[dict],
+    *,
+    audience: str = "coordinator",
+) -> str:
+    """
+    Build a visit-count lead-in.
+
+    Confirmed numeric counts are only stated when every distinct visit is
+    exact_match verified.
+    """
+    names = distinct_scheduled_visit_names(analysis)
+    count = len(names)
+
+    if count == 0:
+        if audience == "patient":
+            return (
+                "A visit count is not available because no visits were "
+                "present in the extracted study summary. That does not "
+                "necessarily mean the full protocol lacks a schedule."
+            )
+        return (
+            "A confirmed visit count is not available because no visits "
+            "were found in the extracted protocol analysis."
+        )
+
+    if _distinct_visits_fully_verified(analysis, verification):
+        visit_word = "visit" if count == 1 else "visits"
+        if audience == "patient":
+            return (
+                f"The extracted study summary lists {count} distinct "
+                f"scheduled {visit_word}. Here is the visit schedule "
+                "(timing values are shown exactly as extracted):"
+            )
+        return (
+            f"The extracted protocol analysis lists {count} distinct "
+            f"scheduled {visit_word}. Verified visit schedule details:"
+        )
+
+    if audience == "patient":
+        return (
+            "A confirmed visit count is not available because visit "
+            "information in the extracted summary is missing or not fully "
+            "source-verified. Available visit schedule details:"
+        )
+    return (
+        "A confirmed visit count is not available because one or more "
+        "visit entries are missing or not fully source-verified "
+        f"({_VERIFIED_STATUS}). Available visit schedule details:"
     )
 
 
@@ -504,9 +605,19 @@ def answer_coordinator_query(
 
     category, label = category_map[intent]
     citations = _collect_category_citations(analysis, verification, category)
+
+    preface_override = None
+    if intent == "visits" and is_visit_count_query(query):
+        preface_override = build_visit_count_preface(
+            analysis,
+            verification,
+            audience="coordinator",
+        )
+
     return _build_lookup_answer(
         intent=intent,
         category_label=label,
         citations=citations,
         accuracy_warnings=accuracy_warnings,
+        preface_override=preface_override,
     )

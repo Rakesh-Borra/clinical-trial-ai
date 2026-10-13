@@ -154,6 +154,94 @@ def test_answer_visits_include_timings():
         "Screening Visit",
         "Follow-up Visit",
     }
+    # General schedule questions should not force a count lead-in.
+    assert "2 distinct scheduled visits" not in answer.answer_text
+
+
+def test_visit_count_questions_return_confirmed_count_and_schedule():
+    from agents.coordinator_assistant_agent import is_visit_count_query
+
+    assert is_visit_count_query("How many visits does the patient have?")
+    assert is_visit_count_query("How many visits?")
+    assert is_visit_count_query("Number of scheduled visits?")
+    assert is_visit_count_query("How many study visits are there?")
+    assert not is_visit_count_query("Show the visit schedule and timings")
+
+    for query in (
+        "How many visits does the patient have?",
+        "How many visits?",
+        "Number of scheduled visits?",
+        "How many study visits are there?",
+    ):
+        answer = answer_coordinator_query(
+            query,
+            _sample_analysis(),
+            _sample_verification(),
+        )
+        assert answer.intent == "visits"
+        assert answer.confidence == "high"
+        assert "2 distinct scheduled visits" in answer.answer_text
+        assert "Day 0" in answer.answer_text
+        assert "Day 30" in answer.answer_text
+        assert all(c.verification_status == "exact_match" for c in answer.citations)
+        assert all(c.source_page == 2 for c in answer.citations)
+
+
+def test_visit_count_uses_distinct_names_for_duplicates():
+    analysis = _sample_analysis()
+    analysis.visits.append(
+        TrialVisit(
+            visit_name="Screening Visit",
+            timing="Day 0",
+            source_page=2,
+        )
+    )
+    verification = _sample_verification()
+
+    answer = answer_coordinator_query(
+        "How many visits?",
+        analysis,
+        verification,
+    )
+
+    assert "2 distinct scheduled visits" in answer.answer_text
+    assert "3 distinct" not in answer.answer_text
+
+
+def test_visit_count_missing_visits_not_confirmed():
+    analysis = ProtocolAnalysis(
+        trial_title="No Visits Study",
+        protocol_id="NV-1",
+    )
+    answer = answer_coordinator_query(
+        "How many visits?",
+        analysis,
+        [],
+    )
+
+    assert answer.confidence == "unavailable"
+    assert "confirmed visit count is not available" in answer.answer_text.casefold()
+    assert "2 distinct" not in answer.answer_text
+    assert answer.citations == []
+
+
+def test_visit_count_unverified_visits_not_confirmed():
+    verification = _sample_verification()
+    for row in verification:
+        if row["category"] == "visits":
+            row["status"] = "not_verified"
+
+    answer = answer_coordinator_query(
+        "How many visits does the patient have?",
+        _sample_analysis(),
+        verification,
+    )
+
+    assert "confirmed visit count is not available" in answer.answer_text.casefold()
+    assert "2 distinct scheduled visits" not in answer.answer_text
+    # Schedule details may still appear as unverified/partial, but not as a
+    # confirmed count.
+    assert answer.confidence == "partial"
 
 
 def test_prefers_verified_and_labels_unverified():

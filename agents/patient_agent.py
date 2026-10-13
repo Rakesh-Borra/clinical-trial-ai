@@ -12,6 +12,10 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Optional, Sequence
 
+from agents.coordinator_assistant_agent import (
+    build_visit_count_preface,
+    is_visit_count_query,
+)
 from models.patient_models import PatientAnswer, PatientCitation
 from models.protocol_models import ProtocolAnalysis
 from services.source_verifier import normalize_text
@@ -672,6 +676,24 @@ def answer_patient_query(
 
     category, topic_label, preface = category_map[intent]
     citations = _collect_category_citations(analysis, verification, category)
+    if intent == "visits" and is_visit_count_query(query):
+        preface = build_visit_count_preface(
+            analysis,
+            verification,
+            audience="patient",
+        )
+        if not citations:
+            return PatientAnswer(
+                answer_text=preface,
+                intent=intent,
+                citations=[],
+                confidence="unavailable",
+                limitations=[
+                    "No visits were present in the extracted study summary.",
+                ],
+                disclaimers=list(_DEFAULT_DISCLAIMERS),
+                audience="patient",
+            )
     return _build_lookup_answer(
         intent=intent,
         topic_label=topic_label,
