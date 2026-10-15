@@ -19,6 +19,12 @@ from models.protocol_models import ProtocolAnalysis
 from services.coordinator_query import answer_from_pipeline_result
 from services.patient_query import answer_patient_from_pipeline_result
 from services.protocol_pipeline import analyze_protocol_pdf
+from ui.patient_guide_tab import (
+    clear_guide,
+    render_guide_review_tab,
+    render_published_guide,
+    term_definition_answer,
+)
 
 RESEARCH_DISCLAIMER = (
     "Research prototype for educational demonstration only. This tool does "
@@ -97,6 +103,7 @@ def clear_analysis_state(*, keep_upload: bool = False) -> None:
     st.session_state.analysis_error = None
     st.session_state.coordinator_history = []
     st.session_state.patient_history = []
+    clear_guide()
     if not keep_upload:
         st.session_state.temp_pdf_path = None
         st.session_state.uploaded_name = None
@@ -618,6 +625,7 @@ def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
             "situation.",
         ]
     )
+    render_published_guide()
     query = st.text_input(
         "Patient question",
         key="patient_query_input",
@@ -629,10 +637,12 @@ def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
         if not query.strip():
             st.warning("Enter a question before asking.")
         else:
-            answer = answer_patient_from_pipeline_result(
-                query.strip(),
-                pipeline_result,
-            )
+            answer = term_definition_answer(query.strip())
+            if answer is None:
+                answer = answer_patient_from_pipeline_result(
+                    query.strip(),
+                    pipeline_result,
+                )
             st.session_state.patient_history.append(
                 {"query": query.strip(), "answer": answer}
             )
@@ -728,17 +738,25 @@ def main() -> None:
     if pipeline_result is None:
         st.markdown(
             "Upload a PDF and click **Analyze protocol** to populate the "
-            "Protocol Summary, Coordinator Assistant, and Patient Assistant tabs."
+            "Protocol Summary, Coordinator Assistant, Patient Guide Review, "
+            "and Patient Assistant tabs."
         )
         return
 
-    tab_summary, tab_coord, tab_patient = st.tabs(
-        ["Protocol Summary", "Coordinator Assistant", "Patient Assistant"]
+    tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(
+        [
+            "Protocol Summary",
+            "Coordinator Assistant",
+            "Patient Guide Review",
+            "Patient Assistant",
+        ]
     )
     with tab_summary:
         render_protocol_summary(pipeline_result)
     with tab_coord:
         render_coordinator_tab(pipeline_result)
+    with tab_guide:
+        render_guide_review_tab(pipeline_result)
     with tab_patient:
         render_patient_tab(pipeline_result)
 
