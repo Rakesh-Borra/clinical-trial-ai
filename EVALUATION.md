@@ -39,9 +39,38 @@ Answer keys (`evaluation/ground_truth/`) list **144 statements** copied from the
 
 | Protocol | Type | Pages | Statements in answer key | Recall | Precision | Page accuracy | Guide items passing checks |
 |---|---|---|---|---|---|---|---|
-| NCT03727854: pre-meal protein bar | Nutrition, single site | 6 | 31 | _run_ | _run_ | _run_ | _run_ |
+| NCT03727854: pre-meal protein bar | Nutrition, single site | 6 | 31 | **71%** (22/31) | **100%** | **100%** | **22/22** (0 flagged) |
 | NCT03829514: fenofibrate | Drug, single site | 11 | 27 | _run_ | _run_ | _run_ | _run_ |
 | NCT02879383: Revita DMR (stress test) | Device, 11 sites | 86 | 86 | _run_ | _run_ | _run_ | _run_ |
+
+Run on a MacBook Air (qwen3:4b via Ollama, num_ctx 16,384): extraction 11.2 min, patient guide 23.5 s.
+
+### What the results show (NCT03727854)
+
+| Category | Found / real |
+|---|---|
+| Inclusion criteria | 5/5 |
+| Exclusion criteria | 11/11 |
+| Visits | 2/3 |
+| Procedures | 4/9 |
+| Safety information | **0/3** |
+
+- **Precise, not yet complete.** Nothing was invented and every page citation was correct, but
+  29% of statements were missed. The system fails by *omission*, not *fabrication*, which is the safer
+  failure mode for patient information, and the reason the coordinator reviews every guide.
+- **Eligibility is strong** (16/16): the information patients ask about most.
+- **Safety statements were missed entirely.** This protocol puts them under "Rescue strategy" rather
+  than "Safety", and the model returned an empty safety list. Section-name variation is a clear
+  target for improvement (e.g. a rescue pass for safety, as already exists for eligibility).
+- **Procedures described in running text** (diet education, randomization, nurse phone calls, the
+  cereal bar itself) were missed; procedures in a list were found.
+
+**Scoring note.** After the first run we found two scorer problems and fixed them before scoring
+any other protocol: visits were compared together with their procedure lists, and short names
+("Blood tests") did not match the detailed answer-key wording. The scorer now compares visit name +
+timing, accepts a shorter name whose words all appear in the answer key, and ignores digits inside
+words (HbA1c, kg/m2). Score before the fix: 65% recall / 91% precision; after: 71% / 100%.
+The answer key itself was not changed.
 
 ### Found while building the evaluation (before any model run)
 

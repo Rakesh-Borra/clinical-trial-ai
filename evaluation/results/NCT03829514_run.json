@@ -1,0 +1,284 @@
+{
+  "pdf": "data/protocols/NCT03829514.pdf",
+  "seconds": 902.6,
+  "analysis": {
+    "trial_title": "Fenofibrate in Type 2 Diabetes- Novel Biomarkers and Mechanisms",
+    "protocol_id": "NCT03829514",
+    "inclusion_criteria": [
+      {
+        "description": "Male or female aged \u226518 and \u2264 70 years",
+        "source_page": 4
+      },
+      {
+        "description": "Type 2 diabetes of at least one year\u2019s duration; stable glycemic control (no more than 1.0% change in HbA1c in the previous six months, but no limit on HbA1c)",
+        "source_page": 5
+      },
+      {
+        "description": "Triglycerides >150 mg/dL (in the previous six months)",
+        "source_page": 5
+      }
+    ],
+    "exclusion_criteria": [
+      {
+        "description": "Previous use of Fenofibrate or other fibrates",
+        "source_page": 5
+      },
+      {
+        "description": "Pregnancy/lactation",
+        "source_page": 5
+      },
+      {
+        "description": "Active malignancy",
+        "source_page": 5
+      },
+      {
+        "description": "Recent cardiac event or congestive heart failure",
+        "source_page": 5
+      },
+      {
+        "description": "Active liver disease (LFT\u2019s > 2x\u2019s normal value)",
+        "source_page": 5
+      },
+      {
+        "description": "Significant renal impairment (serum creatinine > 2mg/dl)",
+        "source_page": 5
+      },
+      {
+        "description": "Current warfarin use",
+        "source_page": 5
+      }
+    ],
+    "procedures": [
+      {
+        "name": "Physical examination",
+        "description": null,
+        "source_page": 6
+      },
+      {
+        "name": "Urine \u03b2-HCG measurement",
+        "description": null,
+        "source_page": 6
+      },
+      {
+        "name": "Fasting blood draw",
+        "description": null,
+        "source_page": 8
+      },
+      {
+        "name": "Timed morning urine collection",
+        "description": null,
+        "source_page": 6
+      },
+      {
+        "name": "Study medication administration",
+        "description": null,
+        "source_page": 6
+      },
+      {
+        "name": "Breakfast provision",
+        "description": null,
+        "source_page": 6
+      },
+      {
+        "name": "Assessment of adverse events and study drug compliance",
+        "description": null,
+        "source_page": 7
+      }
+    ],
+    "visits": [
+      {
+        "visit_name": "Visit 1",
+        "timing": null,
+        "procedures": [
+          "Physical examination",
+          "Urine \u03b2-HCG measurement",
+          "Fasting blood draw",
+          "Timed morning urine collection",
+          "Study medication administration",
+          "Breakfast provision"
+        ],
+        "source_page": 6
+      },
+      {
+        "visit_name": "Visit 2",
+        "timing": "six weeks",
+        "procedures": [
+          "Physical examination",
+          "Fasting blood draw",
+          "Timed morning urine collection",
+          "Assessment of adverse events and study drug compliance"
+        ],
+        "source_page": 6
+      }
+    ],
+    "safety_information": [
+      {
+        "description": "Adverse events anticipated in this study that involves a fasting blood draw and potential side effects of fenofibrate (for example myalgias, elevation of liver enzymes) are few.",
+        "source_page": 8
+      },
+      {
+        "description": "Risks associated with drawing blood from the arm include momentary discomfort and/or bruising. Infection, excess bleeding, clotting, or fainting is possible, although unlikely.",
+        "source_page": 8
+      },
+      {
+        "description": "The potential benefits of the research, which may include lowering of cholesterol and the identification of major new risk factors for complications of diabetes, are considered to outweigh the minimal risks involved.",
+        "source_page": 8
+      }
+    ]
+  },
+  "verification": [
+    {
+      "category": "inclusion_criteria",
+      "statement": "Male or female aged \u226518 and \u2264 70 years",
+      "source_page": 4,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Type 2 diabetes of at least one year\u2019s duration; stable glycemic control (no more than 1.0% change in HbA1c in the previous six months, but no limit on HbA1c)",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Triglycerides >150 mg/dL (in the previous six months)",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Previous use of Fenofibrate or other fibrates",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Pregnancy/lactation",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Active malignancy",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Recent cardiac event or congestive heart failure",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Active liver disease (LFT\u2019s > 2x\u2019s normal value)",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Significant renal impairment (serum creatinine > 2mg/dl)",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Current warfarin use",
+      "source_page": 5,
+      "status": "exact_match"
+    },
+    {
+      "category": "procedures",
+      "statement": "Physical examination",
+      "source_page": 6,
+      "status": "exact_match"
+    },
+    {
+      "category": "procedures",
+      "statement": "Urine \u03b2-HCG measurement",
+      "source_page": 6,
+      "status": "not_verified"
+    },
+    {
+      "category": "procedures",
+      "statement": "Fasting blood draw",
+      "source_page": 8,
+      "status": "exact_match"
+    },
+    {
+      "category": "procedures",
+      "statement": "Timed morning urine collection",
+      "source_page": 6,
+      "status": "not_verified"
+    },
+    {
+      "category": "procedures",
+      "statement": "Study medication administration",
+      "source_page": 6,
+      "status": "not_verified"
+    },
+    {
+      "category": "procedures",
+      "statement": "Breakfast provision",
+      "source_page": 6,
+      "status": "not_verified"
+    },
+    {
+      "category": "procedures",
+      "statement": "Assessment of adverse events and study drug compliance",
+      "source_page": 7,
+      "status": "exact_match"
+    },
+    {
+      "category": "visits",
+      "statement": "Visit 1",
+      "source_page": 6,
+      "status": "exact_match"
+    },
+    {
+      "category": "visits",
+      "statement": "Visit 2",
+      "source_page": 6,
+      "status": "exact_match"
+    },
+    {
+      "category": "safety_information",
+      "statement": "Adverse events anticipated in this study that involves a fasting blood draw and potential side effects of fenofibrate (for example myalgias, elevation of liver enzymes) are few.",
+      "source_page": 8,
+      "status": "exact_match"
+    },
+    {
+      "category": "safety_information",
+      "statement": "Risks associated with drawing blood from the arm include momentary discomfort and/or bruising. Infection, excess bleeding, clotting, or fainting is possible, although unlikely.",
+      "source_page": 8,
+      "status": "exact_match"
+    },
+    {
+      "category": "safety_information",
+      "statement": "The potential benefits of the research, which may include lowering of cholesterol and the identification of major new risk factors for complications of diabetes, are considered to outweigh the minimal risks involved.",
+      "source_page": 8,
+      "status": "exact_match"
+    }
+  ],
+  "accuracy_warnings": [
+    "Eligibility rescue skipped: criteria appear complete.",
+    "inclusion_criteria: corrected source_page for 'Male or female aged \u226518 and \u2264 70 years' from 5 \u2192 4.",
+    "procedures: unsupported statement 'Urine \u03b2-HCG measurement' was not found on any source page.",
+    "procedures: corrected source_page for 'Fasting blood draw' from 6 \u2192 8.",
+    "procedures: unsupported statement 'Timed morning urine collection' was not found on any source page.",
+    "procedures: unsupported statement 'Study medication administration' was not found on any source page.",
+    "procedures: unsupported statement 'Breakfast provision' was not found on any source page.",
+    "safety_information: corrected source_page for 'Adverse events anticipated in this study that involves a fasting blood draw and potential side effects of fenofibrate (for example myalgias, elevation of liver enzymes) are few.' from 10 \u2192 8.",
+    "safety_information: corrected source_page for 'Risks associated with drawing blood from the arm include momentary discomfort and/or bruising. Infection, excess bleeding, clotting, or fainting is possible, although unlikely.' from 10 \u2192 8.",
+    "safety_information: corrected source_page for 'The potential benefits of the research, which may include lowering of cholesterol and the identification of major new risk factors for complications of diabetes, are considered to outweigh the minimal risks involved.' from 10 \u2192 8."
+  ],
+  "extraction_warnings": [],
+  "num_ctx": 16384,
+  "guide": {
+    "items": 22,
+    "passed_checks": 22,
+    "flagged": 0,
+    "flag_reasons": [],
+    "seconds": 28.3
+  }
+}

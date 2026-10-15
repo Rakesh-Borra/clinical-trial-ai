@@ -24,13 +24,16 @@ CATEGORIES = (
 )
 
 MATCH_THRESHOLD = 0.5
+CONTAINED_SCORE = 0.6
 
 _STOPWORDS = {
     "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with",
     "be", "is", "are", "will", "must", "who", "that", "at", "by", "as",
     "participants", "participant", "patients", "patient", "subjects", "subject",
 }
-_NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+# Numbers that stand on their own. Digits inside a word ("HbA1c", "kg/m2",
+# "P2Y12") are part of a name, not a value, so they are not compared.
+_NUMBER = re.compile(r"(?<![A-Za-z])\d+(?:[.,]\d+)*")
 _WORD = re.compile(r"[a-z0-9]+(?:[.,][0-9]+)*")
 
 
@@ -55,7 +58,13 @@ def similarity(truth: str, extracted: str) -> float:
     a, b = tokens(truth), tokens(extracted)
     if not a or not b:
         return 0.0
-    return 2 * len(a & b) / (len(a) + len(b))
+    dice = 2 * len(a & b) / (len(a) + len(b))
+    # A shorter name for the same thing ("Blood tests" for "Blood tests include
+    # complete blood count, ...") counts when every one of its words (at least 2)
+    # appears in the ground-truth statement.
+    if len(b) >= 2 and b <= a:
+        return max(dice, CONTAINED_SCORE)
+    return dice
 
 
 @dataclass
@@ -133,11 +142,9 @@ def extracted_items(analysis: ProtocolAnalysis, category: str) -> List[Item]:
             for p in analysis.procedures
         ]
     if category == "visits":
+        # Name + timing only: the procedures done at a visit are scored under "procedures".
         return [
-            Item(
-                " ".join(x for x in [v.visit_name, v.timing or "", " ".join(v.procedures)] if x),
-                v.source_page,
-            )
+            Item(" ".join(x for x in [v.visit_name, v.timing or ""] if x), v.source_page)
             for v in analysis.visits
         ]
     raise ValueError(f"Unknown category: {category}")

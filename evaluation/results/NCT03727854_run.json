@@ -1,0 +1,269 @@
+{
+  "pdf": "data/protocols/NCT03727854.pdf",
+  "seconds": 673.5,
+  "analysis": {
+    "trial_title": "Effect of pre-meal consumption of protein-enriched, dietary fiber-fortified cereal bar on long-term glycemic control in patients with type 2 diabetes",
+    "protocol_id": "NCT03727854",
+    "inclusion_criteria": [
+      {
+        "description": "BMI 18.5~35 kg/m2",
+        "source_page": 2
+      },
+      {
+        "description": "Type 2 diabetes patients",
+        "source_page": 2
+      },
+      {
+        "description": "Fasting blood glucose \u2265 126 mg/dl or",
+        "source_page": 2
+      },
+      {
+        "description": "HbA1c \u2265 6.5% or",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects who were previously diagnosed with type 2 diabetes and who have been treated with lifestyle modification only, oral anti-diabetic drugs or basal insulin.",
+        "source_page": 2
+      }
+    ],
+    "exclusion_criteria": [
+      {
+        "description": "HbA1c < 6.5% or > 10%",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects using insulin other than basal insulin",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects who have newly started or have changed anti diabetic drugs within 3 months",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects who are allergic to grains, nuts, legumes and milk",
+        "source_page": 2
+      },
+      {
+        "description": "Previous history of gastrointestinal surgery (except for hemorrhoid surgery, appendectomy surgery and hernia surgery)",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects with chronic unstable disease",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects with cognitive inpairment who are not able to follow the study protocol",
+        "source_page": 2
+      },
+      {
+        "description": "Females who are pregnant or doing breast feeding",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects with Aspartate aminotransferase (AST) or alanine aminotransferase (ALT) levels of higher than 3 times of upper normal ranges",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects with hemoglobin level of less than 10.0 g/dL",
+        "source_page": 2
+      },
+      {
+        "description": "Subjects with alcohol addiction or drug abuse",
+        "source_page": 3
+      }
+    ],
+    "procedures": [
+      {
+        "name": "7-point SMBG",
+        "description": null,
+        "source_page": 4
+      },
+      {
+        "name": "Blood tests",
+        "description": null,
+        "source_page": 3
+      },
+      {
+        "name": "Medical history surveys",
+        "description": null,
+        "source_page": 3
+      },
+      {
+        "name": "Anthropometric measurements",
+        "description": null,
+        "source_page": 3
+      }
+    ],
+    "visits": [
+      {
+        "visit_name": "Screening Visit",
+        "timing": "0th visit day",
+        "procedures": [
+          "Blood tests",
+          "Medical history surveys",
+          "Anthropometric measurements",
+          "7-point SMBG"
+        ],
+        "source_page": 3
+      },
+      {
+        "visit_name": "Second visit",
+        "timing": "12 weeks \u00b1 1 week",
+        "procedures": [
+          "Fasting blood glucose sampling",
+          "Body measurements"
+        ],
+        "source_page": 3
+      }
+    ],
+    "safety_information": []
+  },
+  "verification": [
+    {
+      "category": "inclusion_criteria",
+      "statement": "BMI 18.5~35 kg/m2",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Type 2 diabetes patients",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Fasting blood glucose \u2265 126 mg/dl or",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "HbA1c \u2265 6.5% or",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Subjects who were previously diagnosed with type 2 diabetes and who have been treated with lifestyle modification only, oral anti-diabetic drugs or basal insulin.",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "HbA1c < 6.5% or > 10%",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects using insulin other than basal insulin",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects who have newly started or have changed anti diabetic drugs within 3 months",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects who are allergic to grains, nuts, legumes and milk",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Previous history of gastrointestinal surgery (except for hemorrhoid surgery, appendectomy surgery and hernia surgery)",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects with chronic unstable disease",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects with cognitive inpairment who are not able to follow the study protocol",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Females who are pregnant or doing breast feeding",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects with Aspartate aminotransferase (AST) or alanine aminotransferase (ALT) levels of higher than 3 times of upper normal ranges",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects with hemoglobin level of less than 10.0 g/dL",
+      "source_page": 2,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Subjects with alcohol addiction or drug abuse",
+      "source_page": 3,
+      "status": "exact_match"
+    },
+    {
+      "category": "procedures",
+      "statement": "7-point SMBG",
+      "source_page": 4,
+      "status": "exact_match"
+    },
+    {
+      "category": "procedures",
+      "statement": "Blood tests",
+      "source_page": 3,
+      "status": "exact_match"
+    },
+    {
+      "category": "procedures",
+      "statement": "Medical history surveys",
+      "source_page": 3,
+      "status": "exact_match"
+    },
+    {
+      "category": "procedures",
+      "statement": "Anthropometric measurements",
+      "source_page": 3,
+      "status": "exact_match"
+    },
+    {
+      "category": "visits",
+      "statement": "Screening Visit",
+      "source_page": 3,
+      "status": "exact_match"
+    },
+    {
+      "category": "visits",
+      "statement": "Second visit",
+      "source_page": 3,
+      "status": "exact_match"
+    }
+  ],
+  "accuracy_warnings": [
+    "Eligibility rescue skipped: criteria appear complete.",
+    "exclusion_criteria: corrected source_page for 'Subjects with alcohol addiction or drug abuse' from 2 \u2192 3.",
+    "visits: corrected source_page for 'Second visit' from 4 \u2192 3."
+  ],
+  "extraction_warnings": [],
+  "num_ctx": 16384,
+  "guide": {
+    "items": 22,
+    "passed_checks": 22,
+    "flagged": 0,
+    "flag_reasons": [],
+    "seconds": 23.5
+  }
+}

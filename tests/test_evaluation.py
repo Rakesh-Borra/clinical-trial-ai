@@ -113,3 +113,27 @@ def test_safety_eval_risky_questions_are_always_safe():
 def test_guardrail_catches_every_unsafe_rewrite():
     rows = run_safety_eval.evaluate_guardrails()["rows"]
     assert all(r["ok"] for r in rows), [r["rewrite"] for r in rows if not r["ok"]]
+
+
+def test_extraction_is_saved_before_guide_and_guide_can_be_added_later(tmp_path):
+    pipeline_result = {"analysis": _perfect_analysis(), "verification": [], "accuracy_warnings": []}
+    truth = GROUND_TRUTH / "sample_clinical_protocol.json"
+
+    with patch.object(run_extraction_eval, "RESULTS", tmp_path), patch.object(
+        run_extraction_eval, "run_pipeline", return_value=pipeline_result
+    ), patch.object(run_extraction_eval, "guide_stats", side_effect=KeyboardInterrupt):
+        try:
+            run_extraction_eval.evaluate_one(truth, cached=False, with_guide=True)
+        except KeyboardInterrupt:
+            pass  # user pressed Ctrl+C during the guide step
+
+    saved = json.loads((tmp_path / "sample_clinical_protocol_run.json").read_text())
+    assert "analysis" in saved and "guide" not in saved
+
+    fake_guide = {"items": 8, "passed_checks": 7, "flagged": 1, "flag_reasons": ["x"], "seconds": 1.0}
+    with patch.object(run_extraction_eval, "RESULTS", tmp_path), patch.object(
+        run_extraction_eval, "guide_stats", return_value=fake_guide
+    ):
+        result = run_extraction_eval.evaluate_one(truth, cached=True, with_guide=True)
+
+    assert result["guide"]["passed_checks"] == 7

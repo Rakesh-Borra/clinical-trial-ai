@@ -11,6 +11,7 @@ Run from the project root, with Ollama running:
     python -m evaluation.run_extraction_eval            # extraction only
     python -m evaluation.run_extraction_eval --guide    # + patient guide
     python -m evaluation.run_extraction_eval --cached   # re-score saved runs, no Ollama
+    python -m evaluation.run_extraction_eval --cached --guide   # add the guide to saved runs
 
 Writes evaluation/results/extraction_results.md and one JSON per protocol.
 """
@@ -56,15 +57,25 @@ def _num_ctx() -> Optional[int]:
 
 
 def guide_stats(analysis: ProtocolAnalysis) -> dict:
-    from agents.plain_language_agent import generate_patient_guide
+    from agents.plain_language_agent import count_statements, generate_patient_guide
 
-    guide = generate_patient_guide(analysis)
+    total = count_statements(analysis)
+    done = {"n": 0}
+
+    def progress(item) -> None:
+        done["n"] += 1
+        status = "flagged" if item.needs_review else "ok"
+        print(f"    guide item {done['n']}/{total}: {status}", flush=True)
+
+    start = time.time()
+    guide = generate_patient_guide(analysis, on_item=progress)
     items = guide.all_items()
     return {
         "items": len(items),
         "passed_checks": sum(1 for i in items if i.generated_by == "llm"),
         "flagged": sum(1 for i in items if i.needs_review),
         "flag_reasons": [r for i in items for r in i.review_reasons],
+        "seconds": round(time.time() - start, 1),
     }
 
 
@@ -83,7 +94,7 @@ def evaluate_one(truth_path: Path, cached: bool, with_guide: bool) -> Optional[d
         if not pdf.exists():
             print(f"  skipped (PDF not found): {pdf}")
             return None
-        print(f"  analysing {pdf.name} … (this can take several minutes)")
+        print(f"  analysing {pdf.name} … (this can take several minutes)", flush=True)
         start = time.time()
         result = run_pipeline(pdf)
         analysis = result["analysis"]
@@ -96,11 +107,14 @@ def evaluate_one(truth_path: Path, cached: bool, with_guide: bool) -> Optional[d
             "extraction_warnings": result.get("extraction_warnings", []),
             "num_ctx": _num_ctx(),
         }
-        if with_guide:
-            print("  generating patient guide …")
-            start = time.time()
-            record["guide"] = guide_stats(analysis)
-            record["guide"]["seconds"] = round(time.time() - start, 1)
+        # Save straight away, so stopping during the guide step keeps the extraction.
+        RESULTS.mkdir(parents=True, exist_ok=True)
+        saved.write_text(json.dumps(record, indent=2))
+        print(f"  extraction saved ({record['seconds'] / 60:.1f} min)", flush=True)
+
+    if with_guide and not record.get("guide"):
+        print("  generating patient guide …", flush=True)
+        record["guide"] = guide_stats(analysis)
         RESULTS.mkdir(parents=True, exist_ok=True)
         saved.write_text(json.dumps(record, indent=2))
 

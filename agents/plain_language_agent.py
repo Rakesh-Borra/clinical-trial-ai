@@ -264,12 +264,19 @@ def ollama_rewriter(original: str, section: str, feedback: Optional[str] = None)
     """Rewrite one statement with the local Ollama model."""
     import ollama  # imported here so tests do not need a running Ollama server
 
-    response = ollama.chat(
+    kwargs = dict(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": build_prompt(original, section, feedback)}],
         format=PlainLanguageRewrite.model_json_schema(),
         options={"temperature": 0},
     )
+    try:
+        # qwen3 "thinks" before answering by default, which makes each short
+        # rewrite many times slower on a laptop. A one-sentence rewrite does
+        # not need it; our own checks verify the result instead.
+        response = ollama.chat(think=False, **kwargs)
+    except TypeError:  # older ollama client without the think option
+        response = ollama.chat(**kwargs)
     data = json.loads(response["message"]["content"])
     return PlainLanguageRewrite.model_validate(data).plain_text
 
