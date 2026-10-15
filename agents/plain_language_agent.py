@@ -518,6 +518,10 @@ _TERM_QUESTION = re.compile(
 )
 
 
+_MEANING_WORDS = re.compile(r"\b(mean|means|meaning|define|definition)\b", re.IGNORECASE)
+_CONTENT_TERMS = {"inclusion criteria", "exclusion criteria", "follow-up", "screening"}
+
+
 def explain_term_query(query: str) -> Optional[List[GlossaryTerm]]:
     """
     Answer questions such as "What does HbA1c mean?" or "What is an ECG?".
@@ -529,6 +533,10 @@ def explain_term_query(query: str) -> Optional[List[GlossaryTerm]]:
     if not query or not _TERM_QUESTION.search(query):
         return None
     terms = find_medical_terms(query)
+    # "What are the inclusion criteria?" asks for the trial's criteria, not a
+    # definition, so leave it to the Patient Assistant unless "mean" is asked.
+    if not _MEANING_WORDS.search(query):
+        terms = [t for t in terms if t.term not in _CONTENT_TERMS]
     return terms or None
 
 

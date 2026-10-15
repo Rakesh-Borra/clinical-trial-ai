@@ -1,0 +1,25 @@
+{
+  "pdf": "data/sample_clinical_protocol.pdf",
+  "labelled_by": "Nam",
+  "notes": "Hand-labelled from the 2-page demo protocol. One entry per statement, with the PDF page it appears on.",
+  "trial_title": "Type 2 Diabetes Treatment Study",
+  "protocol_id": "T2D-001",
+  "inclusion_criteria": [
+    {"text": "Participants must be between 18 and 65 years old.", "page": 1},
+    {"text": "Participants must have Type 2 Diabetes.", "page": 1}
+  ],
+  "exclusion_criteria": [
+    {"text": "Participants with severe kidney disease are excluded.", "page": 1}
+  ],
+  "procedures": [
+    {"text": "Blood glucose testing.", "page": 2},
+    {"text": "Blood pressure measurement.", "page": 2}
+  ],
+  "visits": [
+    {"text": "Screening Visit: Day 0.", "page": 2},
+    {"text": "Follow-up Visit: Day 30.", "page": 2}
+  ],
+  "safety_information": [
+    {"text": "Participants will be monitored for adverse events.", "page": 2}
+  ]
+}

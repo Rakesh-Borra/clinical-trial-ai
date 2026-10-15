@@ -453,3 +453,11 @@ def test_display_term_capitalisation():
     assert display_term("hba1c") == "HbA1c"
     assert display_term("egfr") == "eGFR"
     assert display_term("placebo") == "Placebo"
+
+
+def test_criteria_questions_are_not_treated_as_definitions():
+    # "What are the inclusion criteria?" wants the trial's criteria, not a definition.
+    assert explain_term_query("What are the inclusion criteria?") is None
+    assert explain_term_query("What are the exclusion criteria?") is None
+    terms = explain_term_query("What does inclusion criteria mean?")
+    assert [t.term for t in terms] == ["inclusion criteria"]

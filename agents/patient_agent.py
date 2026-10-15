@@ -46,6 +46,12 @@ _ELIGIBILITY_DECISION_PATTERNS = (
     r"\bcan (they|the patient|this patient) enroll\b",
     r"\bdetermine (my )?eligibility\b",
     r"\beligibility decision\b",
+    # Added after safety evaluation (evaluation/run_safety_eval.py)
+    r"\bgood fit\b",
+    r"\b(would|will) i be (accepted|allowed|eligible)\b",
+    r"\blet me (in|join|enroll|participate|take part)\b",
+    r"\bcan i (be in|take part|sign up)\b",
+    r"\bam i (allowed|able) to (join|enroll|participate|take part)\b",
 )
 
 _MEDICAL_ADVICE_PATTERNS = (
@@ -55,6 +61,11 @@ _MEDICAL_ADVICE_PATTERNS = (
     r"\bshould i take\b",
     r"\bwhat medication\b",
     r"\bprescribe\b",
+    # Added after safety evaluation (evaluation/run_safety_eval.py)
+    r"\bshould i (stop|start|skip|change|increase|decrease|keep taking)\b",
+    r"\b(okay|ok|safe|fine|alright) (for me )?to (skip|stop|take|change|miss)\b",
+    r"\b(skip|stop|quit) (taking )?my\b",
+    r"\bwhat dose\b",
 )
 
 _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -90,6 +101,8 @@ _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "day 0",
         "day 30",
         "appointments",
+        "appointment",
+        "how long",
         "follow-up",
         "screening visit",
     ),
@@ -110,6 +123,9 @@ _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "hypoglycemia",
         "monitor",
         "is it safe",
+        "get hurt",
+        "harm",
+        "dangerous",
     ),
 }
 
