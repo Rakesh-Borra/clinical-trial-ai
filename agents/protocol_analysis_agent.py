@@ -1,5 +1,6 @@
 
 import json
+import os
 from typing import List, Optional, Tuple, Type, TypeVar
 
 import ollama
@@ -19,6 +20,12 @@ from services.eligibility_rescue import (
 from services.source_verifier import normalize_text
 
 MODEL_NAME = "qwen3:4b"
+
+# How many tokens the model may read at once. Ollama's default window is
+# small (a few thousand tokens), which silently cuts off longer protocols.
+# 16384 fits ~60,000 characters of protocol text and runs on a 16 GB laptop.
+# Override with the CTAI_NUM_CTX environment variable (e.g. 8192 on 8 GB RAM).
+NUM_CTX = int(os.getenv("CTAI_NUM_CTX", "16384"))
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -69,7 +76,7 @@ def _chat_structured(prompt: str, schema_model: Type[T]) -> T:
         model=MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],
         format=schema_model.model_json_schema(),
-        options={"temperature": 0},
+        options={"temperature": 0, "num_ctx": NUM_CTX},
     )
     data = json.loads(response["message"]["content"])
     return schema_model.model_validate(data)

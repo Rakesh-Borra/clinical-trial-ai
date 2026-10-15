@@ -15,7 +15,7 @@ Results are written to `evaluation/results/`. The summary for judges is in [`../
 evaluation/
 ├── patient_questions.json     # 60 patient questions + expected behaviour (dev + held-out)
 ├── guardrail_cases.json       # 24 good/bad plain-language rewrites, labelled by hand
-├── ground_truth/              # hand-labelled answer key for each protocol PDF
+├── ground_truth/              # answer key per protocol PDF (demo + 3 ClinicalTrials.gov protocols, 144 statements)
 ├── matching.py                # how extracted statements are compared with ground truth
 ├── run_safety_eval.py
 ├── run_extraction_eval.py
@@ -24,13 +24,16 @@ evaluation/
 
 ## Adding a real protocol
 
-1. Download a public protocol PDF from ClinicalTrials.gov and save it in `data/protocols/`
-   (that folder is git-ignored; the answer key is committed, the PDF is not).
+1. Download a public protocol PDF from ClinicalTrials.gov and save it in `data/protocols/` as
+   `<NCT number>.pdf` (that folder is git-ignored; the answer key is committed, the PDF is not).
+   The three protocols used so far: NCT03727854, NCT03829514, NCT02879383. Each answer key's
+   `"source"` field links to the study page.
 2. Copy `ground_truth/sample_clinical_protocol.json` to `ground_truth/<short_name>.json`.
 3. Set `"pdf"` to the PDF path and `"pages"` to the page count.
 4. List every inclusion criterion, exclusion criterion, visit, procedure and safety
    statement **exactly as written**, one per entry, with the PDF page number
-   (the page number shown by your PDF viewer, starting at 1).
+   (the page number shown by your PDF viewer, starting at 1). If a statement appears on more
+   than one page, use `"pages": [first, other, ...]`; any of them counts as correct.
 5. Run `python -m evaluation.run_extraction_eval --guide <short_name>`.
 
 Re-score without re-running Ollama: `python -m evaluation.run_extraction_eval --cached`.

@@ -34,9 +34,32 @@ the Q&A layer (see §4).
 
 Command: `python -m evaluation.run_extraction_eval --guide` → [`evaluation/results/extraction_results.md`](evaluation/results/extraction_results.md)
 
-| Protocol | Pages | Recall | Precision | Page accuracy | Guide items passing checks |
-|---|---|---|---|---|---|
-| _to be filled from the results file_ | | | | | |
+Three public protocols from ClinicalTrials.gov, chosen to cover different trial types and lengths.
+Answer keys (`evaluation/ground_truth/`) list **144 statements** copied from the PDFs with their pages.
+
+| Protocol | Type | Pages | Statements in answer key | Recall | Precision | Page accuracy | Guide items passing checks |
+|---|---|---|---|---|---|---|---|
+| NCT03727854: pre-meal protein bar | Nutrition, single site | 6 | 31 | _run_ | _run_ | _run_ | _run_ |
+| NCT03829514: fenofibrate | Drug, single site | 11 | 27 | _run_ | _run_ | _run_ | _run_ |
+| NCT02879383: Revita DMR (stress test) | Device, 11 sites | 86 | 86 | _run_ | _run_ | _run_ | _run_ |
+
+### Found while building the evaluation (before any model run)
+
+**Scrambled PDF text went unnoticed.** In the 86-page Revita protocol, **84 pages** extract as
+scrambled characters (`3URWRFRO` instead of `Protocol`) because of a broken font encoding. The
+original extractor treated this as normal text: 0 pages were flagged for OCR and there was no
+warning, so the model would have been given gibberish.
+**Fix:** the extractor now checks whether text reads like English (share of common words; readable
+protocol pages score ≥ 11%, scrambled ones ≤ 1.4%). Scrambled pages are re-read with OCR, and the
+user is warned when OCR cannot recover them. Result on this protocol: **80 of 84 pages recovered**; the
+remaining 4 (landscape schedule tables) produce a visible warning. Covered by new tests in
+`tests/test_pdf_processor.py`.
+
+**Long protocols were silently cut off.** The model was called without a context-window setting,
+so Ollama's small default window applied, smaller than the fenofibrate protocol alone.
+**Fix:** the context window is now set explicitly (`num_ctx` = 16,384 tokens, adjustable with the
+`CTAI_NUM_CTX` environment variable). The Revita protocol (~60,000 tokens after OCR) is still
+larger than the window, so it is kept as a deliberate stress test of the long-protocol limitation.
 
 ## 3. Human oversight: who decides what
 
@@ -54,7 +77,9 @@ Command: `python -m evaluation.run_extraction_eval --guide` → [`evaluation/res
 - **New phrasings**: keyword intent rules miss many unseen ways of asking (held-out 56%).
   Future work: a small LLM intent classifier with the same safe-refusal rules.
 - **Out-of-scope questions** can be matched to a topic (e.g. *"Can I bring my kids to visits?"* → visit schedule).
-- **Long protocols**: the local model's context window limits how much text it sees at once;
-  very long PDFs need section-by-section processing.
+- **Long protocols**: protocols longer than the model's context window (~60,000 characters at
+  16,384 tokens) are not fully read. Future work: process the PDF section by section.
+- **OCR quality**: OCR can misread symbols (e.g. `≥` read as `2`, `m2` as `m42`). Answer keys use the
+  true protocol text, so these errors count against the system.
 - **Exact-match verification** proves a statement appears on the cited page, not that it is clinically complete.
 - **Glossary** covers ~45 common trial terms; unknown terms are not defined (never invented).

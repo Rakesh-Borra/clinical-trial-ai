@@ -62,6 +62,11 @@ def similarity(truth: str, extracted: str) -> float:
 class Item:
     text: str
     page: Optional[int] = None
+    # Ground truth only: every page where the statement legitimately appears.
+    also_pages: Tuple[int, ...] = ()
+
+    def page_ok(self, cited: Optional[int]) -> bool:
+        return cited is not None and (cited == self.page or cited in self.also_pages)
 
 
 @dataclass
@@ -86,7 +91,7 @@ class CategoryScore:
         with_pages = [(t, e) for t, e, _ in self.matched if t.page is not None]
         if not with_pages:
             return None
-        correct = sum(1 for t, e in with_pages if t.page == e.page)
+        correct = sum(1 for t, e in with_pages if t.page_ok(e.page))
         return correct / len(with_pages)
 
 
@@ -139,7 +144,12 @@ def extracted_items(analysis: ProtocolAnalysis, category: str) -> List[Item]:
 
 
 def truth_items(ground_truth: dict, category: str) -> List[Item]:
-    return [Item(x["text"], x.get("page")) for x in ground_truth.get(category, [])]
+    """Read ground truth. Use "page": 3, or "pages": [3, 4] when a statement appears twice."""
+    items = []
+    for x in ground_truth.get(category, []):
+        pages = x.get("pages") or ([x["page"]] if x.get("page") is not None else [])
+        items.append(Item(x["text"], pages[0] if pages else None, tuple(pages[1:])))
+    return items
 
 
 def score_protocol(analysis: ProtocolAnalysis, ground_truth: dict) -> List[CategoryScore]:
@@ -163,7 +173,7 @@ def overall(scores: Iterable[CategoryScore]) -> dict:
         "matched": matched,
         "recall": matched / truth if truth else None,
         "precision": matched / extracted if extracted else None,
-        "page_accuracy": (sum(1 for t, e in paged if t.page == e.page) / len(paged)) if paged else None,
+        "page_accuracy": (sum(1 for t, e in paged if t.page_ok(e.page)) / len(paged)) if paged else None,
     }
 
 

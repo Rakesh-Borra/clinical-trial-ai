@@ -46,6 +46,15 @@ def run_pipeline(pdf_path: Path) -> dict:
     return analyze_protocol_pdf(str(pdf_path))
 
 
+def _num_ctx() -> Optional[int]:
+    try:
+        from agents.protocol_analysis_agent import NUM_CTX
+
+        return NUM_CTX
+    except Exception:
+        return None
+
+
 def guide_stats(analysis: ProtocolAnalysis) -> dict:
     from agents.plain_language_agent import generate_patient_guide
 
@@ -84,6 +93,8 @@ def evaluate_one(truth_path: Path, cached: bool, with_guide: bool) -> Optional[d
             "analysis": analysis.model_dump(),
             "verification": result.get("verification", []),
             "accuracy_warnings": result.get("accuracy_warnings", []),
+            "extraction_warnings": result.get("extraction_warnings", []),
+            "num_ctx": _num_ctx(),
         }
         if with_guide:
             print("  generating patient guide …")
@@ -106,6 +117,8 @@ def evaluate_one(truth_path: Path, cached: bool, with_guide: bool) -> Optional[d
         "verified": sum(1 for v in verification if v.get("status") == "exact_match"),
         "verification_total": len(verification),
         "guide": record.get("guide"),
+        "pdf_warnings": len(record.get("extraction_warnings", [])),
+        "num_ctx": record.get("num_ctx"),
     }
 
 
@@ -123,8 +136,8 @@ def build_report(results: list) -> str:
         "",
         "## Summary",
         "",
-        "| Protocol | Pages | Time | Recall | Precision | Page accuracy | Verified on page |",
-        "|---|---|---|---|---|---|---|",
+        "| Protocol | Pages | Time | Recall | Precision | Page accuracy | Verified on page | PDF warnings |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         o = r["overall"]
@@ -132,8 +145,11 @@ def build_report(results: list) -> str:
         verified = f"{r['verified']}/{r['verification_total']}" if r["verification_total"] else "n/a"
         lines.append(
             f"| {r['name']} | {r['pages'] or 'n/a'} | {seconds} | {pct(o['recall'])} ({o['matched']}/{o['truth']}) "
-            f"| {pct(o['precision'])} | {pct(o['page_accuracy'])} | {verified} |"
+            f"| {pct(o['precision'])} | {pct(o['page_accuracy'])} | {verified} | {r.get('pdf_warnings', 0)} |"
         )
+    contexts = sorted({r["num_ctx"] for r in results if r.get("num_ctx")})
+    if contexts:
+        lines += ["", f"Model context window (num_ctx): {', '.join(str(c) for c in contexts)} tokens."]
 
     lines += ["", "## By category (all protocols combined)", "", "| Category | Found / real | Recall | Precision | Page accuracy |", "|---|---|---|---|---|"]
     for category in CATEGORIES:
@@ -170,7 +186,7 @@ def build_report(results: list) -> str:
                 lines.append(f"- **Extra / wrongly split** ({LABELS[s.category]}, p.{e.page}): {e.text}")
                 any_issue = True
             for t, e, _ in s.matched:
-                if t.page is not None and e.page != t.page:
+                if t.page is not None and not t.page_ok(e.page):
                     lines.append(f"- **Wrong page** ({LABELS[s.category]}): cited p.{e.page}, real p.{t.page}: {t.text}")
                     any_issue = True
         if not any_issue:
