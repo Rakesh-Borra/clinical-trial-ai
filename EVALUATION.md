@@ -41,14 +41,14 @@ Answer keys (`evaluation/ground_truth/`) list **144 statements** copied from the
 |---|---|---|---|---|---|---|---|
 | NCT03727854: pre-meal protein bar | Nutrition, single site | 6 | 31 | **71%** (22/31) | **100%** | **100%** | **22/22** (0 flagged) |
 | NCT03829514: fenofibrate | Drug, single site | 11 | 27 | **59%** (16/27) | **73%** | **100%** | **22/22** (0 flagged) |
-| NCT02879383: Revita DMR (stress test) | Device, 11 sites | 86 | 86 | _run_ | _run_ | _run_ | _run_ |
+| NCT02879383: Revita DMR (stress test) | Device, 11 sites | 86 | 86 | **23%** (20/86) | **100%** | **75%** | **18/20** (2 flagged) |
+| **Short protocols (first two)** | | 17 | 58 | **66%** (38/58) | **86%** | **100%** | **44/44** |
+| **All three** | | 103 | 144 | **40%** (58/144) | **91%** | **91%** | **62/64** |
 
-| **Both readable protocols combined** | | 17 | 58 | **66%** (38/58) | **86%** | **100%** | **44/44** |
+Run on a MacBook Air (qwen3:4b via Ollama, num_ctx 16,384): extraction 10–15 min per protocol
+(the 86-page protocol includes ~10 min of OCR), patient guide under 30 s for the short protocols.
 
-Run on a MacBook Air (qwen3:4b via Ollama, num_ctx 16,384): extraction 11–15 min per protocol,
-patient guide under 30 s per protocol.
-
-### What the results show
+### What the results show (short protocols)
 
 | Category (both protocols) | Found / real | Precision |
 |---|---|---|
@@ -74,6 +74,43 @@ patient guide under 30 s per protocol.
 - **Page citations are always right (38/38)**, so a coordinator can check any statement in seconds.
 - **The patient guide passed its own checks on every item (44/44)**: no number dropped or changed,
   no advice or eligibility wording. Its quality is bounded by what extraction finds.
+
+### Stress test: an 86-page, multi-site device protocol (NCT02879383)
+
+| Category | Found / real |
+|---|---|
+| Inclusion criteria | **6/6** |
+| Exclusion criteria | 14/33 |
+| Visits | 0/18 |
+| Procedures | 0/15 |
+| Safety information | 0/14 |
+
+- **The main extraction found nothing; the agent's own recovery step found everything that was
+  found.** After OCR the protocol is ~240,000 characters, about four times the model's context
+  window, so the main passes returned no visits, procedures or safety statements. The pipeline then
+  *noticed* eligibility was missing, decided to run its **eligibility rescue pass** on only the
+  eligibility pages, and recovered 6/6 inclusion and 14 exclusion criteria, **all correct** (100% precision).
+  This is the clearest example of the system deciding its next step from an intermediate result.
+- **No fabrication even under stress**: 0 invented statements out of 20.
+- **Page citations dropped to 75% (15/20).** The criteria appear twice in this document, in the
+  synopsis (pp. 9–11) and in the full section (pp. 31–37); citations to either are accepted. The five
+  remaining errors cite page 31 for exclusion criteria that appear only on pp. 11, 33 and 37.
+- **The patient guide's guardrail caught real problems (2 of 20 flagged)**: one rewrite told the
+  reader *"you cannot join"* (an eligibility decision), one rewrite dropped the numbers "2" and "1",
+  and one call to the model failed outright. In every case the agent kept the original protocol
+  wording and flagged the item for the coordinator instead of publishing it. On this long run the
+  guide step was also slow (9.7 min for 20 items, vs. under 30 s on the short protocols), consistent
+  with the laptop being under memory pressure after the long extraction.
+- **Conclusion:** the current design handles typical short protocols but not long ones. The fix is
+  architectural: process long protocols section by section (as the eligibility rescue already does)
+  instead of in one pass.
+
+**Answer-key note for this protocol.** The first scoring showed 15% page accuracy because the answer
+key listed only the full-section pages (31–37) and the model cited the synopsis (pp. 9–11), where the
+same criteria are printed. Full statements (≥ 5 words) were then checked automatically against every
+page and all pages where they appear were added; two short criteria ("28-75 years of age", "Current
+use of Insulin") were added by hand after checking page 9. Visits, procedures and safety items were
+left as hand-labelled, because short names are *mentioned* on many pages.
 
 **Reviewed exception (not counted).** One fenofibrate safety statement the model returned is valid
 but missing from the answer key: *"Adverse events anticipated in this study … potential side effects
@@ -123,8 +160,11 @@ larger than the window, so it is kept as a deliberate stress test of the long-pr
 - **New phrasings**: keyword intent rules miss many unseen ways of asking (held-out 56%).
   Future work: a small LLM intent classifier with the same safe-refusal rules.
 - **Out-of-scope questions** can be matched to a topic (e.g. *"Can I bring my kids to visits?"* → visit schedule).
-- **Long protocols**: protocols longer than the model's context window (~60,000 characters at
-  16,384 tokens) are not fully read. Future work: process the PDF section by section.
+- **Long protocols** (measured): on the 86-page protocol, recall fell to 23% and only the
+  eligibility rescue pass returned anything. Future work: process every section the way the
+  eligibility rescue does.
+- **Safety information** (measured): the weakest category on every protocol (1/24 overall).
+  Future work: a safety rescue pass and section-name synonyms ("Risks", "Rescue strategy", "Withdrawal").
 - **OCR quality**: OCR can misread symbols (e.g. `≥` read as `2`, `m2` as `m42`). Answer keys use the
   true protocol text, so these errors count against the system.
 - **Exact-match verification** proves a statement appears on the cited page, not that it is clinically complete.

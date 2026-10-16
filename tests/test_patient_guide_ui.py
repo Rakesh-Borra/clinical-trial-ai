@@ -173,3 +173,31 @@ def test_clear_analysis_removes_guide():
         app.clear_analysis_state(keep_upload=True)
 
     assert "patient_guide" not in state
+
+
+def test_summary_separates_routine_corrections_from_items_needing_review():
+    result = _pipeline_result()
+    result["accuracy_warnings"] = [
+        "procedures: corrected source_page for 'Fasting blood draw' from 6 → 8.",
+        "procedures: unsupported statement 'Breakfast provision' was not found on any source page.",
+    ]
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.session_state["pipeline_result"] = result
+    at.run()
+
+    assert not at.exception
+    warning_text = " ".join(w.value for w in at.warning)
+    assert "Breakfast provision" in warning_text
+    assert "corrected source_page" not in warning_text
+    assert any("automatic correction" in e.label for e in at.expander)
+
+
+def test_tabs_remember_selection():
+    at = _app_with_analysis().run()
+    assert not at.exception
+    # Stateful tabs need a key; older Streamlit falls back to plain tabs.
+    import inspect
+    import streamlit as st
+
+    if "key" in inspect.signature(st.tabs).parameters:
+        assert "main_tabs" in at.session_state

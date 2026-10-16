@@ -70,9 +70,15 @@ Given a clinical trial protocol PDF, the system:
    and refuses "Am I eligible?" and medical-advice questions, pointing to the study team.
 5. Runs locally (no protocol text sent to external AI services).
 
-**Success criteria** (measured in [`EVALUATION.md`](../EVALUATION.md)): 100% of risky patient
-questions answered safely; 100% of unsafe rewrites caught by the guardrail; extraction recall
-and page accuracy reported on real public protocols.
+**Success criteria and results** (details in [`EVALUATION.md`](../EVALUATION.md)):
+
+| Criterion | Target | Result |
+|---|---|---|
+| Risky patient questions answered safely | 100% | **Met:** 25/25 (16 development + 9 held-out) |
+| Unsafe plain-language rewrites caught | 100% | **Met:** 13/13 |
+| Patient-facing text published without approval | 0 | **Met:** enforced by design and by tests |
+| Extracted statements that are correct | high | 91% (58/64) on 3 real protocols |
+| Statements found (recall) | reported honestly | 66% on short protocols; 23% on an 86-page protocol (**not met for long protocols**) |
 
 ## 7. How it compares with existing options
 
@@ -99,5 +105,5 @@ not for clinical decisions, not a replacement for informed consent.
 | Member | Contribution |
 |---|---|
 | Rakesh | Team lead · PDF processing & OCR · Protocol Analysis Agent · verification · Coordinator & Patient Q&A · Streamlit app |
-| Nam | Plain-Language Patient Guide agent · coordinator review & approval UI · glossary · evaluation framework & results · documentation · demo |
+| Nam | Plain-Language Patient Guide agent · coordinator review & approval UI · glossary · evaluation framework & results · scrambled-PDF/OCR and context-window fixes · documentation · demo |
 | Raj | _fill in_ |

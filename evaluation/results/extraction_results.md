@@ -12,7 +12,7 @@ Ground truth was labelled by hand from each protocol PDF (`evaluation/ground_tru
 
 | Protocol | Pages | Time | Recall | Precision | Page accuracy | Verified on page | PDF warnings |
 |---|---|---|---|---|---|---|---|
-| NCT02879383 | 86 | 10.5 min | 23% (20/86) | 100% | 15% | 10/20 | 4 |
+| NCT02879383 | 86 | 10.5 min | 23% (20/86) | 100% | 75% | 10/20 | 4 |
 | NCT03727854 | 6 | 11.2 min | 71% (22/31) | 100% | 100% | 22/22 | 0 |
 | NCT03829514 | 11 | 15.0 min | 59% (16/27) | 73% | 100% | 18/22 | 0 |
 
@@ -22,8 +22,8 @@ Model context window (num_ctx): 16384 tokens.
 
 | Category | Found / real | Recall | Precision | Page accuracy |
 |---|---|---|---|---|
-| Inclusion criteria | 14/14 | 100% | 100% | 57% |
-| Exclusion criteria | 32/51 | 63% | 100% | 66% |
+| Inclusion criteria | 14/14 | 100% | 100% | 100% |
+| Exclusion criteria | 32/51 | 63% | 100% | 84% |
 | Visits | 4/24 | 17% | 100% | 100% |
 | Procedures | 7/31 | 23% | 64% | 100% |
 | Safety information | 1/24 | 4% | 33% | 100% |
@@ -45,12 +45,6 @@ Why items were flagged:
 ## Failure cases (missed or extra statements)
 
 ### NCT02879383
-- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Able to comply with study requirements and understand and sign the informed consent
-- **Wrong page** (Inclusion criteria): cited p.9, real p.31: HbA1c of 7.5 - 10.0% (59-86 mmol/mol)
-- **Wrong page** (Inclusion criteria): cited p.9, real p.31: 28-75 years of age
-- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Currently taking one or more oral glucose lowering medications, of which one must be Metformin, with no changes in medication in the previous 12 weeks prior to study entry
-- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Diagnosed with Type 2 Diabetes and evidence of preserved insulin secretion. Fasting insulin > 7.0 µU/mL.
-- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Body Mass Index (BMI) ≥ 24 and ≤ 40 kg/m2
 - **Missed** (Exclusion criteria, p.32): Previous GI surgery that could affect the ability to treat the duodenum such as subjects who have had a Bilroth 2, Roux-en-Y gastric bypass, or other similar procedures or conditions
 - **Missed** (Exclusion criteria, p.32): History of chronic or acute pancreatitis
 - **Missed** (Exclusion criteria, p.32): Known active hepatitis or active liver disease
@@ -75,12 +69,6 @@ Why items were flagged:
 - **Wrong page** (Exclusion criteria): cited p.31, real p.33: Anatomic abnormalities in the duodenum that would preclude the completion of the DMR procedure, including tortuous anatomy
 - **Wrong page** (Exclusion criteria): cited p.31, real p.33: Abnormalities of the GI tract preventing endoscopic access to the duodenum
 - **Wrong page** (Exclusion criteria): cited p.31, real p.33: Active and uncontrolled GERD defined as grade III esophagitis or greater
-- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Active H.pylori infection (Participants with active H. pylori may continue with the screening process if they are treated via medication)
-- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Hypoglycemia unawareness or a history of severe hypoglycemia (more than 1 severe hypoglycemic event, as defined by need for third-party-assistance, in the last year)
-- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Current use of GLP-1 analogues
-- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Current use of Insulin
-- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Diagnosed with Type 1 Diabetes or with a history of ketoacidosis
-- **Wrong page** (Exclusion criteria): cited p.10, real p.32: One or more Clinically significant hypoglycemic events defined as self-monitored or laboratory plasma glucose level of < 54 mg/dL (3.0 mmol/L), or a severe hypoglycemic event requiring third-party-assistance, since the screening visit (Visit 1)
 - **Missed** (Visits, p.33): Visit 1: Screening (Pre-Medication Run-In)
 - **Missed** (Visits, p.34): Visit 2: Baseline (Post Medication Run-In), 4-6 weeks after screening
 - **Missed** (Visits, p.37): Visit 2A: Ambulatory Blood Pressure Monitor Return

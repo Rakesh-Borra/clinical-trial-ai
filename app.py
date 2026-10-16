@@ -420,12 +420,28 @@ def render_protocol_summary(pipeline_result: Mapping[str, Any]) -> None:
             f"**Protocol ID:** {analysis.protocol_id or 'Not available in summary'}"
         )
 
-    if extraction_warnings or accuracy_warnings:
-        st.subheader("Warnings")
-        for warning in extraction_warnings:
-            st.warning(f"Extraction: {warning}")
-        for warning in accuracy_warnings:
-            st.warning(f"Accuracy: {warning}")
+    # Routine automatic fixes (page numbers corrected, title recovered) are
+    # collapsed; items that need a coordinator's attention stay visible.
+    routine_markers = ("corrected source_page", "recovered from labeled source")
+    attention = [f"Extraction: {w}" for w in extraction_warnings] + [
+        f"Accuracy: {w}"
+        for w in accuracy_warnings
+        if not any(marker in w for marker in routine_markers)
+    ]
+    routine = [
+        w for w in accuracy_warnings if any(marker in w for marker in routine_markers)
+    ]
+    if attention:
+        st.subheader("Needs review")
+        st.warning(
+            f"{len(attention)} item(s) could not be fully verified. "
+            "Check them against the protocol before approving patient content.\n\n"
+            + "\n".join(f"- {w}" for w in attention)
+        )
+    if routine:
+        with st.expander(f"{len(routine)} automatic correction(s) made during analysis"):
+            for warning in routine:
+                st.markdown(f"- {warning}")
 
     def _render_verified_list(
         title: str,
@@ -743,14 +759,20 @@ def main() -> None:
         )
         return
 
-    tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(
-        [
-            "Protocol Summary",
-            "Coordinator Assistant",
-            "Patient Guide Review",
-            "Patient Assistant",
-        ]
-    )
+    tab_labels = [
+        "Protocol Summary",
+        "Coordinator Assistant",
+        "Patient Guide Review",
+        "Patient Assistant",
+    ]
+    try:
+        # Remember the selected tab, so asking a question or clicking
+        # Approve does not jump back to the first tab.
+        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(
+            tab_labels, key="main_tabs", on_change="rerun"
+        )
+    except TypeError:  # older Streamlit without stateful tabs
+        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(tab_labels)
     with tab_summary:
         render_protocol_summary(pipeline_result)
     with tab_coord:

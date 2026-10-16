@@ -6,6 +6,25 @@ Hackathon MVP that turns dense clinical trial protocol PDFs into **verified, str
 
 This project is an **educational / research prototype**. It does **not** provide medical advice, diagnose conditions, or decide whether any person is eligible for a trial.
 
+**PEAAII AI Applications Hackathon 2026 (Agentic AI).** Start here:
+
+| Document | What it covers |
+|---|---|
+| [`docs/PROJECT_BRIEF.md`](docs/PROJECT_BRIEF.md) | Problem, target users, why this is agentic, workflow diagram, Definition of Done, comparison with existing tools |
+| [`EVALUATION.md`](EVALUATION.md) | How we tested it: 3 real ClinicalTrials.gov protocols, 60 patient questions, failure cases, limitations |
+| [`evaluation/README.md`](evaluation/README.md) | How to reproduce the evaluation |
+
+### Results at a glance
+
+| What we measured | Result |
+|---|---|
+| Risky patient questions (eligibility decisions, medical advice) answered safely | **100%** (25/25, incl. 9 never seen during development) |
+| Unsafe plain-language rewrites caught by the guardrail | **100%** (13/13) |
+| Extracted statements that are correct (3 real protocols) | **91%** (58/64) |
+| Page citations that are correct | **91%** (53/58) |
+| Inclusion criteria found | **100%** (14/14) |
+| All protocol statements found (recall) | 66% on the two short protocols; **23% on an 86-page protocol** (main limitation) |
+
 ---
 
 ## 1. Overview
@@ -16,23 +35,27 @@ Clinical protocols are long and hard to skim. Clinical Trial AI helps by:
 2. Extracting text (with OCR fallback for scanned pages)
 3. Analyzing the protocol with a **local** large language model (`qwen3:4b` via Ollama)
 4. Checking extracted statements against source pages
-5. Showing a protocol summary plus two assistants:
+5. Showing a protocol summary plus:
    - **Coordinator Assistant** — factual lookup for research staff
-   - **Patient Assistant** — plain-language explanations with safety disclaimers
+   - **Patient Guide Review** — the AI writes a plain-language patient guide, checks its own output, retries, and flags what it cannot fix; a coordinator edits and **approves** each item
+   - **Patient Assistant** — the **approved** guide only, a medical-word glossary, and Q&A with safe refusals
 
-Analysis uses Ollama once per uploaded PDF (cached in the session). Coordinator and Patient Q&A are **deterministic**: they only reuse the cached analysis and verification results and **do not** call Ollama again.
+Analysis uses Ollama once per uploaded PDF (cached in the session). The patient guide uses Ollama once more, when the coordinator clicks **Generate patient guide**. Coordinator and Patient Q&A are **deterministic**: they only reuse cached results and **do not** call Ollama.
 
 ---
 
 ## 2. Key features
 
 - **PDF text extraction** with PyMuPDF (`pymupdf`)
-- **OCR fallback** for image-only / scanned pages (`pytesseract` + system Tesseract)
+- **OCR fallback** for image-only / scanned pages (`pytesseract` + system Tesseract), and for PDFs whose text is **scrambled by a broken font** (detected automatically)
 - **Local protocol analysis** with Ollama model **`qwen3:4b`**
 - **Source-page verification** (`exact_match` and related statuses)
 - **Accuracy / completeness checks** after extraction (warnings surfaced in the UI)
 - **Coordinator Assistant** — inclusion/exclusion, visits (including visit counts), procedures, safety, metadata
-- **Patient Assistant** — patient-friendly wording, fixed disclaimers, safe refusals
+- **Plain-Language Patient Guide** — AI rewrite → self-check (numbers kept, no advice or eligibility wording) → retry with feedback → flag for human review
+- **Coordinator approval** — patients only ever see items a coordinator approved
+- **Patient Assistant** — approved guide, medical-word glossary ("What does HbA1c mean?"), safe refusals
+- **Evaluation framework** — answer keys for real protocols, safety question bank, reproducible scoring ([`EVALUATION.md`](EVALUATION.md))
 - **Streamlit UI** — upload, analyze once, then ask questions from cached results
 - **Safety posture** — research disclaimers; no final eligibility decisions; no medical advice
 
@@ -47,7 +70,7 @@ PDF upload (Streamlit)
 Text extraction / OCR fallback
         │
         ▼
-Protocol analysis (Ollama + qwen3:4b)
+Protocol analysis (Ollama + qwen3:4b, num_ctx 16,384)
   • focused extraction passes
   • optional eligibility rescue when needed
   • deterministic accuracy checks
@@ -60,15 +83,20 @@ Cached pipeline result (session state)
         │
         ├─► Protocol Summary tab
         ├─► Coordinator Assistant (deterministic Q&A, no extra Ollama calls)
-        └─► Patient Assistant (deterministic Q&A, no extra Ollama calls)
+        ├─► Patient Guide Review (Ollama rewrite → self-check → retry → flag
+        │                          → coordinator edits / approves)
+        └─► Patient Assistant (approved guide + glossary + deterministic Q&A)
 ```
 
 | Stage | Entry point | Uses Ollama? |
 |-------|-------------|--------------|
 | Analyze PDF | `services/protocol_pipeline.py` → `analyze_protocol_pdf()` | **Yes** (`qwen3:4b`) |
 | Coordinator Q&A | `services/coordinator_query.py` → `answer_from_pipeline_result()` | **No** |
+| Patient guide | `agents/plain_language_agent.py` → `generate_patient_guide()` | **Yes** (short rewrites, "thinking" off) |
 | Patient Q&A | `services/patient_query.py` → `answer_patient_from_pipeline_result()` | **No** |
-| UI | `app.py` | Only when you click **Analyze protocol** |
+| UI | `app.py`, `ui/patient_guide_tab.py` | Only on **Analyze protocol** and **Generate patient guide** |
+
+The model's context window is set to 16,384 tokens (~60,000 characters of protocol text). On a computer with 8 GB of RAM, lower it with `export CTAI_NUM_CTX=8192` before starting the app.
 
 ---
 
@@ -213,13 +241,14 @@ If the terminal prints a different Local URL, use that URL instead.
 2. Upload the demo PDF: **`data/sample_clinical_protocol.pdf`**
 3. Click **Analyze protocol**.
 4. Wait for analysis to finish. **The first analysis can take several minutes** on a laptop because it runs local `qwen3:4b` extraction passes. Progress text in the UI explains that Q&A will not re-run analysis.
-5. Explore the three tabs:
+5. Explore the four tabs:
 
 | Tab | What to look for |
 |-----|------------------|
 | **Protocol Summary** | Title/ID, inclusion/exclusion, visits, procedures, safety, verification statuses, warnings |
 | **Coordinator Assistant** | Staff-oriented factual answers with citations |
-| **Patient Assistant** | Plain-language answers, disclaimers, safe refusals |
+| **Patient Guide Review** | Click **Generate patient guide**, check flagged items, edit wording, **Approve** |
+| **Patient Assistant** | The approved guide, "What does … mean?" answers, safe refusals |
 
 ### Example questions
 
@@ -232,6 +261,7 @@ If the terminal prints a different Local URL, use that URL instead.
 **Patient-style**
 
 - When do I need to visit?
+- What does HbA1c mean?
 - Am I eligible for this trial?
 
 ### Expected safe behavior for eligibility
@@ -247,12 +277,21 @@ After analysis succeeds once for an upload, asking more questions should be fast
 With the virtual environment activated, from the repo root:
 
 ```bash
-python -m pytest tests/ -q
+python -m pytest -q
 ```
 
-These tests are mostly deterministic and **mock** Ollama / pipeline calls where needed. You do **not** need a long live Ollama run to execute the pytest suite.
+153 tests; all should pass (one live-OCR test is skipped if Tesseract is not installed). These tests are mostly deterministic and **mock** Ollama / pipeline calls where needed. You do **not** need a long live Ollama run to execute the pytest suite.
 
-Optional: there are developer scripts under `scripts/` for manual pipeline experiments; those may call Ollama and can be slow. Prefer `pytest tests/` for routine checks.
+Optional: there are developer scripts under `scripts/` for manual pipeline experiments; those may call Ollama and can be slow. `pytest` only collects `tests/` (see `pytest.ini`).
+
+### Run the evaluation
+
+```bash
+python -m evaluation.run_safety_eval                 # no Ollama needed, ~1 s
+python -m evaluation.run_extraction_eval --cached    # re-score saved runs, no Ollama
+```
+
+Re-running the models on the real protocols needs the PDFs in `data/protocols/`; see [`evaluation/README.md`](evaluation/README.md).
 
 ---
 
@@ -288,7 +327,10 @@ clinical-trial-ai/
 ├── agents/
 │   ├── protocol_analysis_agent.py   # Ollama/Qwen extraction (qwen3:4b)
 │   ├── coordinator_assistant_agent.py
-│   └── patient_agent.py
+│   ├── patient_agent.py             # Deterministic patient Q&A + safe refusals
+│   └── plain_language_agent.py      # Patient guide: rewrite → check → retry → flag
+├── ui/
+│   └── patient_guide_tab.py    # Patient Guide Review + approved patient view
 ├── services/
 │   ├── pdf_processor.py        # PDF text + OCR fallback
 │   ├── protocol_pipeline.py    # analyze_protocol_pdf()
@@ -300,14 +342,18 @@ clinical-trial-ai/
 ├── models/
 │   ├── protocol_models.py
 │   ├── coordinator_models.py
-│   └── patient_models.py
+│   ├── patient_models.py
+│   └── plain_language_models.py
+├── evaluation/                 # Answer keys, question bank, scoring, results
+├── docs/PROJECT_BRIEF.md       # Problem, users, agentic design, Definition of Done
+├── EVALUATION.md               # Evaluation results and limitations
 ├── tests/                      # pytest suite
 ├── data/
 │   └── sample_clinical_protocol.pdf   # Demo protocol (synthetic)
 └── scripts/                    # Optional manual smoke scripts (may call Ollama)
 ```
 
-Some files (for example empty stubs or docs mentioning future FastAPI/SQLite) may describe **planned** work. The **running MVP path** is Streamlit → `analyze_protocol_pdf` → coordinator/patient wrappers as above. SQLite storage is **not** required to run this MVP.
+`ARCHITECTURE.md` also describes **planned** work (FastAPI, database, retrieval) that is not part of this MVP. The **running MVP path** is Streamlit → `analyze_protocol_pdf` → coordinator/patient wrappers as above. SQLite storage is **not** required to run this MVP.
 
 ---
 
@@ -318,7 +364,8 @@ Some files (for example empty stubs or docs mentioning future FastAPI/SQLite) ma
 - **No medical advice** and **no final eligibility decisions**.
 - Demo content uses **synthetic / sample** protocol material (for example `data/sample_clinical_protocol.pdf`). Do not upload real patient-identifying data.
 - Analysis depends on a **local Ollama** install and enough machine resources; quality varies with model and PDF layout.
-- Coordinator/Patient assistants use **keyword-style deterministic** matching; unusual phrasing may be unsupported.
+- Coordinator/Patient assistants use **keyword-style deterministic** matching; unusual phrasing may be unsupported (measured: 56% of new phrasings handled as intended; unhandled ones fall back to a safe "can't answer").
+- **Long protocols** exceed the model's context window: recall fell to 23% on an 86-page protocol. **Safety sections** are the weakest category. See [`EVALUATION.md`](EVALUATION.md).
 - Always read the full protocol and involve qualified clinicians / the study team for real enrollment questions.
 
 ---
@@ -363,7 +410,7 @@ Then open a **Pull Request** on GitHub from your branch toward `main` (or the br
 
 ### Before you open a PR
 
-1. Run `python -m pytest tests/ -q`
+1. Run `python -m pytest -q`
 2. Avoid committing secrets (`.env`), real patient data, or large unrelated files
 3. Coordinate before editing files owned by another teammate
 4. Do not force-push shared branches unless the team explicitly agrees
@@ -374,7 +421,7 @@ Then open a **Pull Request** on GitHub from your branch toward `main` (or the br
 
 - **Rakesh — Team Lead:** AI agents, backend, integration, testing
 - **Raj — Contributor:** Sample protocols, evaluation, testing, documentation
-- **Nam — Contributor:** Streamlit UI, patient portal, usability
+- **Nam — Contributor:** Plain-language Patient Guide agent, coordinator review & approval UI, glossary, evaluation framework and results, scrambled-PDF/OCR and context-window fixes, documentation
 
 ---
 
@@ -388,4 +435,5 @@ Then open a **Pull Request** on GitHub from your branch toward `main` (or the br
 6. [ ] `python -m streamlit run app.py`
 7. [ ] Upload `data/sample_clinical_protocol.pdf` → **Analyze protocol**
 8. [ ] Ask coordinator/patient questions; confirm eligibility refusal is safe
-9. [ ] `python -m pytest tests/ -q`
+9. [ ] **Patient Guide Review** → Generate → Approve; check the **Patient Assistant** tab shows only approved items
+10. [ ] `python -m pytest -q`

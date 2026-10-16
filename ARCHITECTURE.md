@@ -1,5 +1,11 @@
-
 # Clinical Trial AI — System Architecture
+
+> **Built vs planned.** This document describes the full target architecture. The hackathon MVP
+> implements the **Streamlit app, PDF/OCR processing, the Protocol Analysis Agent with eligibility
+> rescue, source verification, the Coordinator and Patient assistants, and the Plain-Language Agent
+> with coordinator approval**. Verification is implemented as `services/source_verifier.py` and
+> `services/protocol_accuracy.py`. The **FastAPI backend, PostgreSQL/SQLite storage, vector store,
+> authentication and the API endpoints in §11 are planned, not built.** See `README.md` for what runs today.
 
 ## 1. Project Overview
 

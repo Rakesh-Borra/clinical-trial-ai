@@ -201,6 +201,8 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
         st.rerun()
 
     only_flagged = st.toggle("Show only items that need review", key="guide_only_flagged")
+    if only_flagged and flagged == 0:
+        st.success("No items need review: every rewrite passed the automatic checks.")
 
     for s_index, section in enumerate(guide.sections()):
         items = [i for i in section.items if i.needs_review or not only_flagged]
