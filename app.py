@@ -17,10 +17,11 @@ import streamlit as st
 
 from models.protocol_models import ProtocolAnalysis
 from services.coordinator_query import answer_from_pipeline_result
-from services.patient_query import answer_patient_from_pipeline_result
+from agents.guide_patient_agent import APPROVED_STATUS, answer_patient_from_guide
 from services.protocol_pipeline import analyze_protocol_pdf
 from ui.patient_guide_tab import (
     clear_guide,
+    get_guide,
     render_guide_review_tab,
     render_published_guide,
     term_definition_answer,
@@ -286,6 +287,13 @@ def format_display_answer_text(
     citations = list(getattr(answer, "citations", []) or [])
     answer_text = getattr(answer, "answer_text", "") or ""
     patient_style = (audience or getattr(answer, "audience", "")) == "patient"
+
+    # Answers built from the approved Patient Guide are already written for
+    # patients; show them as they are.
+    if citations and all(
+        getattr(c, "verification_status", "") == APPROVED_STATUS for c in citations
+    ):
+        return re.sub(r"\n{3,}", "\n\n", answer_text.strip())
 
     if intent in {"medical_advice_refused", "unsupported"} or not citations:
         # Keep agent prose for refusals/empty cases; just normalize spacing.
@@ -626,10 +634,11 @@ def render_coordinator_tab(pipeline_result: Mapping[str, Any]) -> None:
 
 
 def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
-    """Patient-friendly Q&A over the cached pipeline result."""
+    """Patient Q&A that answers only from the approved Patient Guide."""
     st.caption(
-        "Plain-language explanations of the study summary. This assistant "
-        "cannot decide personal eligibility or give medical advice."
+        "Answers use only the parts of the patient guide the study team has "
+        "approved. This assistant cannot decide personal eligibility or give "
+        "medical advice."
     )
     _render_tab_disclaimers(
         [
@@ -655,10 +664,9 @@ def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
         else:
             answer = term_definition_answer(query.strip())
             if answer is None:
-                answer = answer_patient_from_pipeline_result(
-                    query.strip(),
-                    pipeline_result,
-                )
+                # Patients only ever get coordinator-approved content, never
+                # the raw protocol analysis.
+                answer = answer_patient_from_guide(query.strip(), get_guide())
             st.session_state.patient_history.append(
                 {"query": query.strip(), "answer": answer}
             )

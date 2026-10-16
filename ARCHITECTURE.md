@@ -67,7 +67,9 @@ Responsibilities:
 
 Responsibilities:
 - Generate plain-language trial explanations.
-- Answer patient questions using approved sources.
+- Answer patient questions using approved Patient Guide items only
+  (`agents/guide_patient_agent.py`); topics not yet approved are reported
+  as "still under review", never read from the raw protocol analysis.
 - Explain trial visits and procedures.
 - Indicate when information is unavailable.
 - Refer medical or eligibility questions to a qualified

@@ -38,7 +38,7 @@ Clinical protocols are long and hard to skim. Clinical Trial AI helps by:
 5. Showing a protocol summary plus:
    - **Coordinator Assistant** — factual lookup for research staff
    - **Patient Guide Review** — the AI writes a plain-language patient guide, checks its own output, retries, and flags what it cannot fix; a coordinator edits and **approves** each item
-   - **Patient Assistant** — the **approved** guide only, a medical-word glossary, and Q&A with safe refusals
+   - **Patient Assistant** — the **approved** guide only, a medical-word glossary, and Q&A with safe refusals. Answers use only approved guide items; anything not yet approved is reported as still under review
 
 Analysis uses Ollama once per uploaded PDF (cached in the session). The patient guide uses Ollama once more, when the coordinator clicks **Generate patient guide**. Coordinator and Patient Q&A are **deterministic**: they only reuse cached results and **do not** call Ollama.
 
@@ -280,7 +280,7 @@ With the virtual environment activated, from the repo root:
 python -m pytest -q
 ```
 
-153 tests; all should pass (one live-OCR test is skipped if Tesseract is not installed). These tests are mostly deterministic and **mock** Ollama / pipeline calls where needed. You do **not** need a long live Ollama run to execute the pytest suite.
+162 tests; all should pass (one live-OCR test is skipped if Tesseract is not installed). These tests are mostly deterministic and **mock** Ollama / pipeline calls where needed. You do **not** need a long live Ollama run to execute the pytest suite.
 
 Optional: there are developer scripts under `scripts/` for manual pipeline experiments; those may call Ollama and can be slow. `pytest` only collects `tests/` (see `pytest.ini`).
 

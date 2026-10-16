@@ -37,7 +37,7 @@ Status at hackathon submission (PEAAII AI Applications Hackathon, Oct 2026).
 - [x] Patient question bank (60 questions, incl. 18 held-out)
 - [x] Guardrail test cases (24 rewrites)
 - [x] Extraction accuracy, page accuracy and failure-case report (EVALUATION.md)
-- [x] Automated test suite (153 tests)
+- [x] Automated test suite (162 tests)
 
 ## Platform (future work)
 - [ ] Backend API (FastAPI)
