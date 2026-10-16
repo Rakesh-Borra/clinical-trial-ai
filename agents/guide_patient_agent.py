@@ -8,17 +8,20 @@ topic has not been approved yet, it says the study team is still reviewing
 it.
 
 Deterministic: no LLM calls. It reuses the Patient Assistant's intent
-rules, so eligibility-decision and medical-advice questions are refused
-exactly as before.
+rules, then adds natural-language patterns and topic matching so questions
+like "Do I need Type 2 diabetes to join?" can find the relevant approved
+statement. Eligibility-decision and medical-advice questions are refused.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+import re
+from typing import List, Optional, Sequence, Tuple
 
 from agents.patient_agent import classify_patient_intent
 from models.patient_models import PatientAnswer, PatientCitation
 from models.plain_language_models import GuideItem, GuideSection, PatientGuide
+from services.source_verifier import normalize_text
 
 APPROVED_STATUS = "coordinator_approved"
 
@@ -68,6 +71,226 @@ _SECTION_INTENTS = {
     ),
 }
 
+# Extra natural-language cues used only when the shared classifier returns
+# "unsupported". Keep these join/visit/procedure-scoped so bare clinical
+# words alone do not force a section intent.
+_NATURAL_INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "eligibility_inclusion": (
+        r"\b(do i|does (a |the )?person|does someone|do you) need\b.{0,60}\b"
+        r"(join|enroll|participate|take part|study|trial)\b",
+        r"\b(is|are) .{0,40}\brequired\b.{0,40}\b"
+        r"(to )?(join|enroll|participate|take part)\b",
+        r"\b(age|diabetes|hba1c)\s+requirement\b",
+        r"\brequirements? to (join|enroll|participate|take part)\b",
+        r"\bmust (i|someone|participants?|people)\b.{0,40}\b"
+        r"(join|enroll|participate|have|be)\b",
+        r"\bwho (can|may|is able to) (join|enroll|participate|take part)\b",
+        r"\binclusion\b",
+        r"\bqualif(?:y|ies|ication|ications)\b.{0,40}\b"
+        r"(join|enroll|study|trial)\b",
+    ),
+    "eligibility_exclusion": (
+        r"\bwho (cannot|can't|may not|is not able to) (join|enroll|participate)\b",
+        r"\b(exclusion|excluded|disqualif)",
+        r"\bnot (allowed|able|permitted) to (join|enroll|participate)\b",
+        r"\breasons? (someone |i )?(cannot|can't|may not)\b",
+    ),
+    "visits": (
+        r"\b(visit|visits|appointment|appointments)\b",
+        r"\bstudy schedule\b",
+        r"\bhow (often|many times) .{0,20}\b(come|go|visit|return)\b",
+        r"\b(screening|follow[- ]?up) visit\b",
+    ),
+    "procedures": (
+        r"\b(procedure|procedures)\b",
+        r"\b(blood (work|draw|glucose|pressure)|lab tests?)\b",
+        r"\bwhat (tests|procedures) (are|will|do)\b",
+        r"\bstudy (tests?|testing)\b",
+    ),
+    "safety": (
+        r"\b(side effects?|adverse events?)\b",
+        r"\b(monitored|monitoring) for\b",
+        r"\bis it safe\b",
+        r"\bsafety (information|risks?|monitoring)\b",
+    ),
+    "study_overview": (
+        r"\bwhat (is|study) (this|the) (study|trial)\b",
+        r"\b(study|trial) (name|title|called)\b",
+        r"\bprotocol id\b",
+    ),
+}
+
+# Phrases that suggest a specific requirement rather than the whole section.
+_SPECIFIC_TOPIC_CUES = (
+    r"\b(do i|does someone|does a person) need\b",
+    r"\b(is|are) .{0,40}\brequired\b",
+    r"\bmust (i|someone)\b",
+    r"\bage\b",
+    r"\bage range\b",
+    r"\byears? old\b",
+    r"\bdiabetes\b",
+    r"\bhba1c\b",
+    r"\begfr\b",
+    r"\btype 2\b",
+    r"\bblood (glucose|pressure)\b",
+    r"\bside effects?\b",
+    r"\badverse events?\b",
+)
+
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "to",
+        "for",
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "is",
+        "are",
+        "was",
+        "be",
+        "do",
+        "does",
+        "did",
+        "can",
+        "could",
+        "would",
+        "will",
+        "i",
+        "me",
+        "my",
+        "you",
+        "your",
+        "we",
+        "they",
+        "them",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "about",
+        "with",
+        "from",
+        "into",
+        "have",
+        "has",
+        "had",
+        "need",
+        "needs",
+        "needed",
+        "join",
+        "joining",
+        "study",
+        "trial",
+        "please",
+        "tell",
+        "what",
+        "who",
+        "when",
+        "where",
+        "which",
+        "how",
+        "why",
+        "any",
+        "some",
+        "someone",
+        "person",
+        "people",
+        "take",
+        "part",
+        "able",
+        "may",
+        "might",
+        "also",
+        "just",
+        "only",
+        "still",
+        "more",
+        "than",
+        "then",
+        "there",
+        "here",
+        "know",
+        "ask",
+        "question",
+        "information",
+        "detail",
+        "details",
+        "general",
+        "must",
+        "required",
+        "requirement",
+        "requirements",
+        "criteria",
+        "criterion",
+        "eligible",
+        "eligibility",
+        "enroll",
+        "enrolling",
+        "participate",
+        "participating",
+        "participation",
+        "allowed",
+        "permission",
+    }
+)
+
+# Shared phrase list for both query↔item scoring (longer phrases first).
+_TOPIC_PHRASES = (
+    "type 2 diabetes",
+    "type 2",
+    "blood glucose",
+    "blood pressure",
+    "adverse events",
+    "adverse event",
+    "side effects",
+    "side effect",
+    "follow-up visit",
+    "follow up visit",
+    "screening visit",
+    "years old",
+    "year old",
+    "age range",
+)
+
+# Topic families: query must mention a cue; item must match related wording.
+# Age deliberately excludes bare "years" and bare "between N and M" so BMI,
+# dose, and disease-duration ranges are not treated as age requirements.
+_TOPIC_FAMILIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "age": (
+        ("age", "age range", "years old", "year old"),
+        (),  # item match uses _AGE_ITEM_PATTERNS only
+    ),
+    "diabetes": (
+        ("diabetes", "diabetic", "type 2", "t2d"),
+        ("diabetes", "diabetic", "type 2", "t2d"),
+    ),
+    "hba1c": (
+        ("hba1c", "a1c"),
+        ("hba1c", "a1c"),
+    ),
+    "egfr": (
+        ("egfr",),
+        ("egfr",),
+    ),
+}
+
+# Guide-item age cues: require explicit age language, never a bare numeric range.
+_AGE_ITEM_PATTERNS = (
+    r"\bage range\b",
+    r"\bage\b",
+    r"\byears? old\b",
+    r"\b\d{1,3}\s*(?:to|-)\s*\d{1,3}\s+years?\s*old\b",
+)
+
 
 def _answer(
     text: str,
@@ -109,8 +332,14 @@ def _citation(item: GuideItem) -> PatientCitation:
 
 def _pending_note(count: int) -> str:
     if count == 1:
-        return "One more item on this topic is still being reviewed by the study team, so it is not shown yet."
-    return f"{count} more items on this topic are still being reviewed by the study team, so they are not shown yet."
+        return (
+            "One more item on this topic is still being reviewed by the "
+            "study team, so it is not shown yet."
+        )
+    return (
+        f"{count} more items on this topic are still being reviewed by the "
+        "study team, so they are not shown yet."
+    )
 
 
 def _under_review(topic: str) -> str:
@@ -131,7 +360,162 @@ def _not_published() -> PatientAnswer:
     )
 
 
-def _section_answer(guide: PatientGuide, intent: str) -> PatientAnswer:
+def _significant_tokens(text: str) -> set[str]:
+    tokens = re.findall(r"[a-z0-9]+(?:\.[0-9]+)?%?", normalize_text(text))
+    return {
+        token
+        for token in tokens
+        if token not in _STOPWORDS and (len(token) > 2 or token.isdigit())
+    }
+
+
+def _item_blob(item: GuideItem) -> str:
+    return normalize_text(f"{item.original_text} {item.plain_text}")
+
+
+def _query_mentions(query_norm: str, cues: tuple[str, ...]) -> bool:
+    return any(cue in query_norm for cue in cues)
+
+
+def _topic_family_hits(query_norm: str, item_norm: str) -> int:
+    """Boost when a question topic family aligns with item wording."""
+    score = 0
+    for family, (query_cues, item_cues) in _TOPIC_FAMILIES.items():
+        if not _query_mentions(query_norm, query_cues):
+            continue
+        if family == "age":
+            if any(re.search(pattern, item_norm) for pattern in _AGE_ITEM_PATTERNS):
+                score += 4
+            continue
+        if any(cue in item_norm for cue in item_cues):
+            score += 3
+    return score
+
+
+def _item_relevance(query: str, item: GuideItem) -> int:
+    """Score how specifically a guide item matches the patient's question."""
+    query_norm = normalize_text(query)
+    item_norm = _item_blob(item)
+    score = 0
+
+    for phrase in _TOPIC_PHRASES:
+        if phrase in query_norm and phrase in item_norm:
+            score += 4
+
+    score += _topic_family_hits(query_norm, item_norm)
+
+    overlap = _significant_tokens(query) & _significant_tokens(
+        f"{item.original_text} {item.plain_text}"
+    )
+    score += len(overlap)
+    return score
+
+
+def _looks_specific(query: str) -> bool:
+    normalized = normalize_text(query)
+    return any(re.search(pattern, normalized) for pattern in _SPECIFIC_TOPIC_CUES)
+
+
+def _classify_intent(query: str) -> str:
+    """Shared classifier first, then natural-language fallbacks."""
+    intent = classify_patient_intent(query)
+    if intent != "unsupported":
+        return intent
+
+    normalized = normalize_text(query)
+    scored: list[tuple[int, str]] = []
+    for candidate, patterns in _NATURAL_INTENT_PATTERNS.items():
+        hits = sum(1 for pattern in patterns if re.search(pattern, normalized))
+        if hits:
+            scored.append((hits, candidate))
+
+    if not scored:
+        return "unsupported"
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
+def _split_by_relevance(
+    query: str,
+    items: Sequence[GuideItem],
+    *,
+    min_score: int = 1,
+) -> Tuple[List[GuideItem], List[GuideItem], bool]:
+    """
+    Partition items into relevant approved / relevant unapproved.
+
+    Returns (approved_matches, unapproved_matches, used_topic_filter).
+    - Broad question: filtered=False → caller may list the full approved section.
+    - Specific question with no item match: filtered=True and empty lists →
+      caller returns a safe no-information reply (never an unrelated dump).
+    """
+    scored = [(_item_relevance(query, item), item) for item in items]
+    matches = [(score, item) for score, item in scored if score >= min_score]
+    specific = _looks_specific(query)
+
+    if not matches:
+        # Specific with no overlap must not fall through to the full section.
+        return [], [], specific
+
+    best = max(score for score, _ in matches)
+    # Keep the strongest matches; drop weak incidental overlaps.
+    threshold = max(min_score, best - 1)
+    strong = [item for score, item in matches if score >= threshold]
+    approved = [item for item in strong if item.approved]
+    unapproved = [item for item in strong if not item.approved]
+    return approved, unapproved, True
+
+
+def _specific_answer(
+    *,
+    intent: str,
+    topic: str,
+    approved_matches: List[GuideItem],
+    unapproved_matches: List[GuideItem],
+) -> PatientAnswer:
+    if approved_matches:
+        opener = (
+            "Here is what the study team has approved that relates to "
+            "your question:"
+        )
+        lines = [opener, ""] + [_line(item) for item in approved_matches]
+        limitations: List[str] = []
+        if unapproved_matches:
+            lines += [
+                "",
+                "Some related details are still being reviewed by the study "
+                "team, so they are not shown yet.",
+            ]
+            limitations.append(
+                f"{len(unapproved_matches)} related item(s) awaiting approval."
+            )
+        if intent == "eligibility_inclusion":
+            lines += [
+                "",
+                "This is general study information only. Only the study team "
+                "can confirm whether it applies to you.",
+            ]
+        return _answer(
+            "\n".join(lines),
+            intent,
+            citations=[_citation(item) for item in approved_matches],
+            confidence="high" if not unapproved_matches else "partial",
+            limitations=limitations,
+        )
+
+    # Relevant content exists but is not approved — do not reveal it.
+    return _answer(
+        _under_review(topic),
+        intent,
+        limitations=[
+            f"{len(unapproved_matches)} related item(s) about {topic} "
+            "are awaiting approval."
+        ],
+    )
+
+
+def _section_answer(guide: PatientGuide, intent: str, query: str) -> PatientAnswer:
     attr, topic, opener = _SECTION_INTENTS[intent]
     section: GuideSection = getattr(guide, attr)
     approved = _approved(section)
@@ -144,6 +528,30 @@ def _section_answer(guide: PatientGuide, intent: str) -> PatientAnswer:
             intent,
             limitations=[f"The guide has no items about {topic}."],
         )
+
+    approved_matches, unapproved_matches, filtered = _split_by_relevance(
+        query,
+        section.items,
+    )
+    if filtered:
+        if approved_matches or unapproved_matches:
+            return _specific_answer(
+                intent=intent,
+                topic=topic,
+                approved_matches=approved_matches,
+                unapproved_matches=unapproved_matches,
+            )
+        # Specific cue but no item overlap (e.g. asking about something
+        # not in this section's guide text).
+        return _answer(
+            f"I don't have approved information that answers that specific "
+            f"question about {topic}. {_ASK_ABOUT}",
+            intent,
+            limitations=[
+                "No approved guide item matched the specific topic asked.",
+            ],
+        )
+
     if not approved:
         return _answer(
             _under_review(topic),
@@ -157,7 +565,11 @@ def _section_answer(guide: PatientGuide, intent: str) -> PatientAnswer:
         lines += ["", _pending_note(pending)]
         limitations.append(f"{pending} item(s) about {topic} are awaiting approval.")
     if intent == "eligibility_inclusion":
-        lines += ["", "Meeting these does not decide anything on its own. Only the study team can confirm who can join."]
+        lines += [
+            "",
+            "Meeting these does not decide anything on its own. Only the "
+            "study team can confirm who can join.",
+        ]
     return _answer(
         "\n".join(lines),
         intent,
@@ -181,13 +593,21 @@ def _eligibility_refusal(guide: PatientGuide) -> PatientAnswer:
         "study team can decide.",
     ]
     if inclusions or exclusions:
-        lines += ["", "Here are the general criteria the study team has approved, which you can talk through with them:"]
+        lines += [
+            "",
+            "Here are the general criteria the study team has approved, "
+            "which you can talk through with them:",
+        ]
     if inclusions:
         lines += ["", "**Who may be able to join:**"] + [_line(i) for i in inclusions]
     if exclusions:
         lines += ["", "**Who may not be able to join:**"] + [_line(i) for i in exclusions]
     if not inclusions and not exclusions:
-        lines += ["", "The study team is still reviewing the joining criteria, so I can't share them yet."]
+        lines += [
+            "",
+            "The study team is still reviewing the joining criteria, so "
+            "I can't share them yet.",
+        ]
     elif pending:
         lines += ["", _pending_note(pending)]
 
@@ -222,13 +642,19 @@ def _overview(guide: PatientGuide) -> PatientAnswer:
     )
 
 
-def answer_patient_from_guide(query: str, guide: Optional[PatientGuide]) -> PatientAnswer:
+def answer_patient_from_guide(
+    query: str,
+    guide: Optional[PatientGuide],
+) -> PatientAnswer:
     """Answer a patient question using approved Patient Guide items only."""
     if not query or not query.strip():
-        return _answer(f"Please ask a question about the study. {_ASK_ABOUT}", "unsupported",
-                       limitations=["Empty query."])
+        return _answer(
+            f"Please ask a question about the study. {_ASK_ABOUT}",
+            "unsupported",
+            limitations=["Empty query."],
+        )
 
-    intent = classify_patient_intent(query)
+    intent = _classify_intent(query)
 
     # Refusals never depend on what has been approved.
     if intent == "medical_advice_refused":
@@ -242,7 +668,7 @@ def answer_patient_from_guide(query: str, guide: Optional[PatientGuide]) -> Pati
     if intent == "study_overview":
         return _overview(guide)
     if intent in _SECTION_INTENTS:
-        return _section_answer(guide, intent)
+        return _section_answer(guide, intent, query)
 
     return _answer(
         "I'm not sure I understood that question. " + _ASK_ABOUT + " I can't "
