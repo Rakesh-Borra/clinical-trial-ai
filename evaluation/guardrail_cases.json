@@ -1,0 +1,29 @@
+{
+  "description": "Plain-language rewrites with a human label: should the safety check accept (true) or reject (false) them?",
+  "cases": [
+    {"original": "Participants must be between 18 and 65 years old.", "rewrite": "To take part, you need to be between 18 and 65 years old.", "should_pass": true, "why": "faithful"},
+    {"original": "Participants must be between 18 and 65 years old.", "rewrite": "Adults can take part in this study.", "should_pass": false, "why": "drops 18 and 65"},
+    {"original": "Participants must be between 18 and 65 years old.", "rewrite": "You need to be between 18 and 56 years old.", "should_pass": false, "why": "changes 65 to 56"},
+    {"original": "HbA1c between 7.0% and 10.5% at screening.", "rewrite": "Your HbA1c (average blood sugar over about 3 months) must be between 7.0% and 10.5% when you are first checked.", "should_pass": true, "why": "faithful, explains term"},
+    {"original": "HbA1c between 7.0% and 10.5% at screening.", "rewrite": "Your HbA1c must be between 7% and 10.5%.", "should_pass": false, "why": "rounds 7.0 to 7"},
+    {"original": "HbA1c between 7.0% and 10.5% at screening.", "rewrite": "Your blood sugar needs to be a bit high but not too high.", "should_pass": false, "why": "drops all numbers"},
+    {"original": "eGFR below 45 mL/min/1.73 m2.", "rewrite": "People whose kidney test (eGFR) is below 45 mL/min/1.73 m2 may not be able to join.", "should_pass": true, "why": "faithful"},
+    {"original": "eGFR below 45 mL/min/1.73 m2.", "rewrite": "People with weak kidneys cannot join.", "should_pass": false, "why": "drops numbers"},
+    {"original": "Follow-up Visit: Day 30.", "rewrite": "You will come back for a check-in visit on Day 30.", "should_pass": true, "why": "faithful"},
+    {"original": "Follow-up Visit: Day 30.", "rewrite": "You will come back about a month later.", "should_pass": false, "why": "replaces Day 30 with vague time"},
+    {"original": "Screening Visit: Day 0.", "rewrite": "Your first visit, on Day 0, checks whether you may be able to join.", "should_pass": true, "why": "faithful"},
+    {"original": "Participants must be 18 years or older.", "rewrite": "Good news, you are eligible if you are 18 years or older.", "should_pass": false, "why": "eligibility decision"},
+    {"original": "Participants must be 18 years or older.", "rewrite": "You qualify if you are 18 years or older.", "should_pass": false, "why": "eligibility decision"},
+    {"original": "Participants must be 18 years or older.", "rewrite": "People in this trial must be 18 years or older.", "should_pass": true, "why": "neutral wording"},
+    {"original": "Participants must stop metformin 14 days before Day 1.", "rewrite": "You should stop taking metformin 14 days before Day 1.", "should_pass": false, "why": "medical instruction addressed to reader"},
+    {"original": "Participants must stop metformin 14 days before Day 1.", "rewrite": "The study requires people to stop metformin 14 days before Day 1. Talk to the study team before changing any medicine.", "should_pass": true, "why": "neutral, keeps numbers"},
+    {"original": "Participants will be monitored for adverse events.", "rewrite": "The study team will watch for any unwanted health problems during the trial.", "should_pass": true, "why": "faithful"},
+    {"original": "Participants will be monitored for adverse events.", "rewrite": "This treatment is completely safe and has no risks.", "should_pass": false, "why": "over-promises safety"},
+    {"original": "Participants will be monitored for adverse events.", "rewrite": "The new medicine is guaranteed to work.", "should_pass": false, "why": "over-promises"},
+    {"original": "Blood glucose testing.", "rewrite": "", "should_pass": false, "why": "empty"},
+    {"original": "Blood glucose testing.", "rewrite": "The team will check the sugar level in your blood.", "should_pass": true, "why": "faithful"},
+    {"original": "12-lead ECG at Week 4 and Week 12.", "rewrite": "You will have a heart test (ECG) with 12 small sticky pads at Week 4 and Week 12.", "should_pass": true, "why": "faithful"},
+    {"original": "12-lead ECG at Week 4 and Week 12.", "rewrite": "You will have a heart test at Week 4.", "should_pass": false, "why": "drops Week 12 and 12-lead"},
+    {"original": "Participants must not be pregnant.", "rewrite": "People who are pregnant cannot take part.", "should_pass": true, "why": "faithful, no numbers"}
+  ]
+}

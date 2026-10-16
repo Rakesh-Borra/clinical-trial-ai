@@ -1,57 +1,48 @@
-
 # Clinical Trial AI — Team Development Board
 
-## Project Goal
-Build a working Agentic AI platform for clinical trial
-protocol intelligence, coordinator assistance, and
-patient-friendly, source-grounded information.
+Status at hackathon submission (PEAAII AI Applications Hackathon, Oct 2026).
 
 ## Status Legend
-- [ ] Not started
-- [x] Completed
+- [x] Done in this MVP
+- [ ] Not done (planned / future work)
 
-## Rakesh — AI, Backend & Integration
-- [ ] PDF extraction with page-level references
-- [ ] Protocol Analysis Agent
-- [ ] Patient Assistant Agent
-- [ ] Verification Agent
-- [ ] Agent orchestration
-- [ ] RAG and vector search
+## Protocol processing & AI agents
+- [x] PDF extraction with page-level references
+- [x] OCR fallback for scanned pages
+- [x] Detection of scrambled PDF text (broken fonts) with OCR fallback
+- [x] Protocol Analysis Agent (focused extraction passes, qwen3:4b via Ollama)
+- [x] Eligibility rescue pass when criteria look incomplete
+- [x] Source-page verification and accuracy checks
+- [x] Coordinator Assistant (deterministic, cited answers)
+- [x] Patient Assistant (deterministic, safe refusals for eligibility and medical advice)
+- [x] Plain-Language Agent: rewrite → self-check → retry → flag for review
+- [x] Medical-word glossary ("What does HbA1c mean?")
+- [ ] Section-by-section processing for long protocols (main limitation, see EVALUATION.md)
+- [ ] Safety-information rescue pass (weakest category, see EVALUATION.md)
+- [ ] LLM intent classifier for unseen question phrasings
+- [ ] RAG / vector search
+- [ ] Protocol version comparison
+
+## User interface (Streamlit)
+- [x] Protocol upload and analysis
+- [x] Protocol summary with verification status and warnings
+- [x] Coordinator Q&A tab
+- [x] Patient guide review and approval (coordinator)
+- [x] Patient view showing approved content only
+- [ ] Trial list / multiple trials
+- [ ] Role-based login (coordinator vs patient)
+
+## Evaluation & QA
+- [x] Public protocols from ClinicalTrials.gov (3) with hand-checked answer keys (144 statements)
+- [x] Patient question bank (60 questions, incl. 18 held-out)
+- [x] Guardrail test cases (24 rewrites)
+- [x] Extraction accuracy, page accuracy and failure-case report (EVALUATION.md)
+- [x] Automated test suite (162 tests)
+
+## Platform (future work)
+- [ ] Backend API (FastAPI)
 - [ ] Database and protocol versioning
-- [ ] Backend API integration
-
-## Raj — Research, Evaluation & QA
-- [ ] Collect public clinical trial protocols
-- [ ] Prepare synthetic evaluation scenarios
-- [ ] Create expected-answer evaluation dataset
-- [ ] Test extraction accuracy and completeness
-- [ ] Test unsupported answers and hallucinations
-- [ ] Implement automated regression tests
-- [ ] Document evaluation results
-
-## Nam — Frontend & User Experience
-- [ ] Coordinator dashboard
-- [ ] Protocol upload interface
-- [ ] Trial list and detail screens
-- [ ] AI-generated summary review and approval UI
-- [ ] Patient portal
-- [ ] Source-grounded chatbot interface
-- [ ] Protocol version comparison UI
-- [ ] Responsive design and accessibility
-
-## Shared Integration Tasks
-- [ ] Connect frontend with backend
-- [ ] Implement role-based authentication
-- [ ] Enforce coordinator approval before publication
-- [ ] Implement security and privacy safeguards
-- [ ] Run end-to-end tests
-- [ ] Configure deployment and monitoring
-- [ ] Prepare project demonstration
-
-## Current Focus
-Rakesh: PDF extraction pipeline
-Raj: Public protocol samples and evaluation scenarios
-Nam: Coordinator dashboard structure
+- [ ] Deployment and monitoring
 
 ## Collaboration Rules
 1. Work primarily in your assigned folders.
@@ -65,4 +56,3 @@ Nam: Coordinator dashboard structure
 This is a research prototype. AI outputs require
 appropriate human review and must not independently
 provide diagnosis, eligibility decisions, or medical advice.
-

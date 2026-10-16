@@ -1,5 +1,11 @@
-
 # Clinical Trial AI — System Architecture
+
+> **Built vs planned.** This document describes the full target architecture. The hackathon MVP
+> implements the **Streamlit app, PDF/OCR processing, the Protocol Analysis Agent with eligibility
+> rescue, source verification, the Coordinator and Patient assistants, and the Plain-Language Agent
+> with coordinator approval**. Verification is implemented as `services/source_verifier.py` and
+> `services/protocol_accuracy.py`. The **FastAPI backend, PostgreSQL/SQLite storage, vector store,
+> authentication and the API endpoints in §11 are planned, not built.** See `README.md` for what runs today.
 
 ## 1. Project Overview
 
@@ -61,7 +67,9 @@ Responsibilities:
 
 Responsibilities:
 - Generate plain-language trial explanations.
-- Answer patient questions using approved sources.
+- Answer patient questions using approved Patient Guide items only
+  (`agents/guide_patient_agent.py`); topics not yet approved are reported
+  as "still under review", never read from the raw protocol analysis.
 - Explain trial visits and procedures.
 - Indicate when information is unavailable.
 - Refer medical or eligibility questions to a qualified

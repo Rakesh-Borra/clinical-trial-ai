@@ -1,0 +1,572 @@
+{
+  "pdf": "data/protocols/NCT02879383.pdf",
+  "source": "https://clinicaltrials.gov/study/NCT02879383 (Study Protocol document, Protocol C-30000 v5.0)",
+  "pages": 86,
+  "labelled_by": "Nam (drafted with AI assistance, spot-checked against the PDF)",
+  "notes": "Long multi-site device protocol used as a stress test. 84 of 86 pages have a broken font encoding (selectable text is scrambled) and must be OCR'd. Page numbers are PDF pages and match the printed 'Page X of 86'. Visit headings also appear in the table of contents (page 5), which is accepted. Procedure and device risks are labelled one bullet per item, as written. Device-engineering risks (section 1.5.2) and statistical sections are not labelled. Full statements repeated elsewhere (e.g. in the protocol synopsis) list every page where they appear, found automatically; the first page is the main section.",
+  "trial_title": "Effect of Duodenal Mucosal Resurfacing (DMR) Using the Revita System in the Treatment of Type 2 Diabetes",
+  "protocol_id": "C-30000",
+  "inclusion_criteria": [
+    {
+      "text": "28-75 years of age",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Diagnosed with Type 2 Diabetes and evidence of preserved insulin secretion. Fasting insulin > 7.0 µU/mL.",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "HbA1c of 7.5 - 10.0% (59-86 mmol/mol)",
+      "pages": [
+        31,
+        9,
+        10,
+        32,
+        35
+      ]
+    },
+    {
+      "text": "Body Mass Index (BMI) ≥ 24 and ≤ 40 kg/m2",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Currently taking one or more oral glucose lowering medications, of which one must be Metformin, with no changes in medication in the previous 12 weeks prior to study entry",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Able to comply with study requirements and understand and sign the informed consent",
+      "pages": [
+        31,
+        9
+      ]
+    }
+  ],
+  "exclusion_criteria": [
+    {
+      "text": "Diagnosed with Type 1 Diabetes or with a history of ketoacidosis",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Current use of Insulin",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Current use of GLP-1 analogues",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Hypoglycemia unawareness or a history of severe hypoglycemia (more than 1 severe hypoglycemic event, as defined by need for third-party-assistance, in the last year)",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Known autoimmune disease, as evidenced by a positive Anti-GAD test, including Celiac disease, or pre-existing symptoms of systemic lupus erythematosus, scleroderma or other autoimmune connective tissue disorder",
+      "pages": [
+        31,
+        9
+      ]
+    },
+    {
+      "text": "Active H.pylori infection (Participants with active H. pylori may continue with the screening process if they are treated via medication)",
+      "pages": [
+        31,
+        9,
+        34
+      ]
+    },
+    {
+      "text": "Previous GI surgery that could affect the ability to treat the duodenum such as subjects who have had a Bilroth 2, Roux-en-Y gastric bypass, or other similar procedures or conditions",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "History of chronic or acute pancreatitis",
+      "page": 32
+    },
+    {
+      "text": "Known active hepatitis or active liver disease",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Symptomatic gallstones or kidney stones, acute cholecystitis or history of duodenal inflammatory diseases including Crohn's Disease and Celiac Disease",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "History of coagulopathy, upper gastro-intestinal bleeding conditions such as ulcers, gastric varices, strictures, congenital or acquired intestinal telangiectasia",
+      "pages": [
+        32,
+        10,
+        33
+      ]
+    },
+    {
+      "text": "Use of anticoagulation therapy (such as warfarin) which cannot be discontinued for 7 days before and 14 days after the procedure",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Use of P2Y12 inhibitors (clopidogrel, pasugrel, ticagrelor) which cannot be discontinued for 14 days before and 14 days after the procedure. Use of aspirin is allowed.",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Unable to discontinue NSAIDs (non-steroidal anti-inflammatory drugs) during treatment through 4 weeks post procedure phase",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Taking corticosteroids or drugs known to affect GI motility (e.g. Metoclopramide)",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Receiving weight loss medications such as Meridia, Xenical, or over the counter weight loss medications",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Persistent Anemia, defined as Hgb<10 g/dl",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "eGFR or MDRD <30 ml/min/1.73m2",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Active systemic infection",
+      "page": 32
+    },
+    {
+      "text": "Active malignancy within the last 5 years",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Not potential candidates for surgery or general anesthesia",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Active illicit substance abuse or alcoholism",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Participating in another ongoing clinical trial of an investigational drug or device",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "Any other mental or physical condition which, in the opinion of the Investigator, makes the subject a poor candidate for clinical trial participation",
+      "pages": [
+        32,
+        10
+      ]
+    },
+    {
+      "text": "HbA1c post run-in phase < 7.5% (59 mmol/mol) or > 10.0% (86 mmol/mol)",
+      "pages": [
+        32,
+        35,
+        10
+      ]
+    },
+    {
+      "text": "One or more Clinically significant hypoglycemic events defined as self-monitored or laboratory plasma glucose level of < 54 mg/dL (3.0 mmol/L), or a severe hypoglycemic event requiring third-party-assistance, since the screening visit (Visit 1)",
+      "pages": [
+        32,
+        35,
+        10
+      ]
+    },
+    {
+      "text": "Hyperglycemic event defined as three self-monitored finger sticks in 1 day during the run-in period with fasting blood glucose measurements >15 mmol/L (270 mg/dL) or non-fasting blood glucose measurements >20 mmol/L (360 mg/dL)",
+      "pages": [
+        32,
+        35,
+        16,
+        56
+      ]
+    },
+    {
+      "text": "Those who are pregnant, nursing or expect to become pregnant over the course of the study",
+      "pages": [
+        33,
+        35,
+        36,
+        11
+      ]
+    },
+    {
+      "text": "Active and uncontrolled GERD defined as grade III esophagitis or greater",
+      "pages": [
+        33,
+        37,
+        11
+      ]
+    },
+    {
+      "text": "Abnormalities of the GI tract preventing endoscopic access to the duodenum",
+      "pages": [
+        33,
+        37,
+        11
+      ]
+    },
+    {
+      "text": "Anatomic abnormalities in the duodenum that would preclude the completion of the DMR procedure, including tortuous anatomy",
+      "pages": [
+        33,
+        37,
+        11
+      ]
+    },
+    {
+      "text": "Malignancy newly diagnosed by endoscopy",
+      "pages": [
+        33,
+        37
+      ]
+    },
+    {
+      "text": "Upper gastro-intestinal conditions such as ulcers, polyps, gastric varices, strictures, congenital or acquired intestinal telangiectasia",
+      "pages": [
+        33,
+        37,
+        10,
+        11,
+        32
+      ]
+    }
+  ],
+  "visits": [
+    {
+      "text": "Visit 1: Screening (Pre-Medication Run-In)",
+      "pages": [
+        33,
+        5
+      ]
+    },
+    {
+      "text": "Visit 2: Baseline (Post Medication Run-In), 4-6 weeks after screening",
+      "pages": [
+        34,
+        5
+      ]
+    },
+    {
+      "text": "Visit 2A: Ambulatory Blood Pressure Monitor Return",
+      "pages": [
+        37,
+        5
+      ]
+    },
+    {
+      "text": "Visit 3: Procedure",
+      "pages": [
+        37,
+        5
+      ]
+    },
+    {
+      "text": "Visit 4: 7 Day Phone Call",
+      "pages": [
+        40,
+        5
+      ]
+    },
+    {
+      "text": "Visit 5: 14 Day Phone Call",
+      "pages": [
+        40,
+        5
+      ]
+    },
+    {
+      "text": "Visit 6: 4 Week (28 Day) Clinic Visit",
+      "pages": [
+        41,
+        5
+      ]
+    },
+    {
+      "text": "Visit 7: 12 Week (84 Days) Clinic Visit",
+      "pages": [
+        42,
+        5
+      ]
+    },
+    {
+      "text": "Visit 7A: Ambulatory Blood Pressure Monitor Return",
+      "pages": [
+        43,
+        5
+      ]
+    },
+    {
+      "text": "Visit 7.1: 15 Week (105 Day) Phone Call",
+      "pages": [
+        44,
+        5
+      ]
+    },
+    {
+      "text": "Visit 8: 18 Week (126 Day) Clinic Visit",
+      "pages": [
+        44,
+        5
+      ]
+    },
+    {
+      "text": "Visit 8.1: 21 Week (147 Day) Phone Call",
+      "pages": [
+        45,
+        5
+      ]
+    },
+    {
+      "text": "Visit 9: 24 Week (168 Day) Clinic Visit",
+      "pages": [
+        46,
+        5
+      ]
+    },
+    {
+      "text": "Visit 3C: Cross-over to DMR Visit (0-14 days from Visit 9)",
+      "pages": [
+        47,
+        5
+      ]
+    },
+    {
+      "text": "Visit 9.1: 30 Week (210 Day) Phone Call",
+      "pages": [
+        48,
+        5
+      ]
+    },
+    {
+      "text": "Visit 10: 36 Week (252 Day) Clinic Visit",
+      "pages": [
+        48,
+        5
+      ]
+    },
+    {
+      "text": "Visit 10.1: 42 Week (294 Day) Phone Call",
+      "pages": [
+        49,
+        5
+      ]
+    },
+    {
+      "text": "Visit 11: 48 Week (336 Day) Clinic Visit",
+      "pages": [
+        50,
+        5
+      ]
+    }
+  ],
+  "procedures": [
+    {
+      "text": "Demographics, medical history and full physical exam",
+      "pages": [
+        33,
+        52
+      ]
+    },
+    {
+      "text": "Targeted physical exam",
+      "page": 52
+    },
+    {
+      "text": "Blood analysis",
+      "pages": [
+        33,
+        53
+      ]
+    },
+    {
+      "text": "H. pylori test",
+      "page": 34
+    },
+    {
+      "text": "Oral anti-diabetic medication run-in (4 weeks)",
+      "page": 34
+    },
+    {
+      "text": "Subject self-monitored blood glucose (SMBG) and glycemia diary",
+      "pages": [
+        34,
+        56
+      ]
+    },
+    {
+      "text": "Nutritional counseling",
+      "pages": [
+        34,
+        56
+      ]
+    },
+    {
+      "text": "Urinary Protein Excretion (UPE) test",
+      "page": 54
+    },
+    {
+      "text": "Mixed Meal Tolerance Test (MMTT)",
+      "page": 55
+    },
+    {
+      "text": "Ambulatory Blood Pressure Monitoring (ABPM)",
+      "pages": [
+        55,
+        37
+      ]
+    },
+    {
+      "text": "Liver MRI: Magnetic Resonance-Proton Density Fat Fraction (MR-PDFF) and Magnetic Resonance Liver Iron Content (MR-LIC)",
+      "page": 56
+    },
+    {
+      "text": "Endoscopic evaluation of the esophagus, stomach and duodenum",
+      "page": 37
+    },
+    {
+      "text": "Randomization 1:1 to DMR procedure or sham procedure",
+      "page": 38
+    },
+    {
+      "text": "Duodenal Mucosal Resurfacing (DMR) procedure using the Revita System",
+      "page": 38
+    },
+    {
+      "text": "Sham procedure: Revita catheter placed in the stomach for 30 minutes and removed",
+      "page": 38
+    }
+  ],
+  "safety_information": [
+    {
+      "text": "abdominal tightness, cramping, pain",
+      "page": 22
+    },
+    {
+      "text": "diarrhea",
+      "page": 22
+    },
+    {
+      "text": "difficulty swallowing",
+      "page": 22
+    },
+    {
+      "text": "infection",
+      "page": 22
+    },
+    {
+      "text": "mucosal injury to GI tract",
+      "page": 22
+    },
+    {
+      "text": "pancreatitis",
+      "page": 23
+    },
+    {
+      "text": "perforation",
+      "page": 23
+    },
+    {
+      "text": "sore throat",
+      "page": 23
+    },
+    {
+      "text": "stricture",
+      "page": 23
+    },
+    {
+      "text": "transient bleeding",
+      "page": 23
+    },
+    {
+      "text": "worsening diabetic symptoms including hypoglycemia",
+      "pages": [
+        23,
+        68
+      ]
+    },
+    {
+      "text": "AEs are collected from the time the Informed Consent is signed.",
+      "pages": [
+        34,
+        66
+      ]
+    },
+    {
+      "text": "Glucose alert value <70 mg/dL (3.9 mmol/L): sufficiently low for treatment with fast-acting carbohydrate",
+      "page": 62
+    },
+    {
+      "text": "Clinically significant hypoglycemia <54 mg/dL (3.0 mmol/L)",
+      "pages": [
+        62,
+        10,
+        16,
+        32,
+        35
+      ]
+    }
+  ]
+}

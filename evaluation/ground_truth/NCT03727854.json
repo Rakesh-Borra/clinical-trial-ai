@@ -1,0 +1,50 @@
+{
+  "pdf": "data/protocols/NCT03727854.pdf",
+  "source": "https://clinicaltrials.gov/study/NCT03727854 (Study Protocol document)",
+  "pages": 6,
+  "labelled_by": "Nam (drafted with AI assistance, spot-checked against the PDF)",
+  "notes": "Page numbers are PDF pages (first page = 1). Statements copied as written in the protocol, including its own spelling. The research nurse's 4-weekly phone call is labelled as a procedure, not a visit.",
+  "trial_title": "Effect of pre-meal consumption of protein-enriched, dietary fiber-fortified cereal bar on long-term glycemic control in patients with type 2 diabetes",
+  "protocol_id": "NCT03727854",
+  "inclusion_criteria": [
+    {"text": "BMI 18.5~35 kg/m2", "page": 2},
+    {"text": "Type 2 diabetes patients", "page": 2},
+    {"text": "Fasting blood glucose ≥ 126 mg/dl", "page": 2},
+    {"text": "HbA1c ≥ 6.5%", "page": 2},
+    {"text": "Subjects who were previously diagnosed with type 2 diabetes and who have been treated with lifestyle modification only, oral anti-diabetic drugs or basal insulin.", "page": 2}
+  ],
+  "exclusion_criteria": [
+    {"text": "HbA1c < 6.5% or > 10%", "page": 2},
+    {"text": "Subjects using insulin other than basal insulin", "page": 2},
+    {"text": "Subjects who have newly started or have changed anti diabetic drugs within 3 months", "page": 2},
+    {"text": "Subjects who are allergic to grains, nuts, legumes and milk", "page": 2},
+    {"text": "Previous history of gastrointestinal surgery (except for hemorrhoid surgery, appendectomy surgery and hernia surgery)", "page": 2},
+    {"text": "Subjects with chronic unstable disease", "page": 2},
+    {"text": "Subjects with cognitive inpairment who are not able to follow the study protocol", "page": 2},
+    {"text": "Females who are pregnant or doing breast feeding", "page": 2},
+    {"text": "Subjects with Aspartate aminotransferase (AST) or alanine aminotransferase (ALT) levels of higher than 3 times of upper normal ranges", "page": 2},
+    {"text": "Subjects with hemoglobin level of less than 10.0 g/dL", "page": 2},
+    {"text": "Subjects with alcohol addiction or drug abuse", "page": 3}
+  ],
+  "visits": [
+    {"text": "Visit 0, screening visit", "page": 3},
+    {"text": "1st visit date, study start", "page": 4},
+    {"text": "Visit at 12 weeks ± 1 week, study-end exam", "pages": [5, 3]}
+  ],
+  "procedures": [
+    {"text": "Blood tests include complete blood count, fasting plasma glucose, hemoglobin A1c, aspartate aminotransferase (AST), alanine aminotransferase (ALT), serum creatinine, total cholesterol, triglycerides, high-density lipoprotein cholesterol, low-density lipoprotein cholesterol, Insulin, and C-peptide", "pages": [3, 4]},
+    {"text": "Medical history surveys", "page": 3},
+    {"text": "Anthropometric measurements (height, weight, abdominal circumference)", "page": 3},
+    {"text": "Diabetes dietary education", "pages": [4, 3]},
+    {"text": "7-point self-monitoring of blood glucose (SMBG) for one day", "pages": [4, 3]},
+    {"text": "Randomization", "pages": [4, 3]},
+    {"text": "Protein-enriched cereal bar consumed 15 minutes before meals", "page": 4},
+    {"text": "Research nurse calls the subjects every four weeks to check compliance", "page": 4},
+    {"text": "Fasting blood glucose sampling and body measurements at 12 weeks", "page": 5}
+  ],
+  "safety_information": [
+    {"text": "Subjects should not change their existing diabetes medications and doses during the study period.", "pages": [4, 5]},
+    {"text": "If the blood glucose level is more than 270 mg/dL at week 0-6, or more than 240 mg/dL at week 7-12 for three consecutive days, subjects were required to contact the clinical trial center to determine whether a visit is necessary.", "page": 5},
+    {"text": "If the subject experience more than one hypoglycemia (less than 70 mg/dL), they are required to contact the clinical trial center to determine if a visit is necessary.", "page": 5}
+  ]
+}

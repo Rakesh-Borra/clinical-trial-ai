@@ -240,3 +240,81 @@ def test_structured_pdf_extraction(tmp_path):
     assert first_block["block_id"] == "p1_b1"
     assert "Inclusion Criteria" in first_block["text"]
     assert len(first_block["bbox"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# Scrambled-text detection (added after evaluation on real protocols:
+# NCT02879383 extracts as "3URWRFRO" instead of "Protocol" on 84/86 pages).
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch as _patch
+
+from services.pdf_processor import PDFProcessingError as _PDFError
+from services.pdf_processor import _looks_garbled
+
+_READABLE = (
+    "Subjects must be at least 18 years of age and must have type 2 diabetes "
+    "for at least one year. Subjects with a history of kidney disease will be "
+    "excluded from the study. All subjects will be asked to sign the informed "
+    "consent form before any procedures are performed at the screening visit."
+)
+
+
+def _scramble(text: str) -> str:
+    # The same shift the broken font in NCT02879383 produces ("P" -> "3").
+    return "".join(chr(ord(c) - 29) if c.isalpha() else c for c in text)
+
+
+def test_looks_garbled_flags_scrambled_text_only():
+    assert _looks_garbled(_scramble(_READABLE)) is True
+    assert _looks_garbled(_READABLE) is False
+    # Short text (titles, headers) is never judged.
+    assert _looks_garbled(_scramble("Protocol Title Page")) is False
+
+
+def _pdf_with_text(tmp_path, text):
+    pdf_path = tmp_path / "scrambled.pdf"
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_textbox(pymupdf.Rect(50, 50, 550, 800), text, fontsize=10)
+    document.save(pdf_path)
+    document.close()
+    return pdf_path
+
+
+def test_scrambled_page_is_replaced_by_ocr_text(tmp_path):
+    pdf_path = _pdf_with_text(tmp_path, _scramble(_READABLE))
+
+    with _patch("services.pdf_processor._ocr_pdf_page", return_value=_READABLE):
+        result = extract_pdf(str(pdf_path))
+
+    page = result["pages"][0]
+    assert page["garbled_text_detected"] is True
+    assert page["ocr_applied"] is True
+    assert "type 2 diabetes" in page["text"]
+    assert result["warnings"] == []
+
+
+def test_scrambled_page_without_ocr_is_warned(tmp_path):
+    pdf_path = _pdf_with_text(tmp_path, _scramble(_READABLE))
+
+    with _patch(
+        "services.pdf_processor._ocr_pdf_page",
+        side_effect=_PDFError("OCR requires the Tesseract OCR binary on PATH."),
+    ):
+        result = extract_pdf(str(pdf_path))
+
+    page = result["pages"][0]
+    assert page["garbled_text_detected"] is True
+    assert page["ocr_applied"] is False
+    assert any("scrambled" in w for w in result["warnings"])
+
+
+def test_readable_page_is_not_sent_to_ocr(tmp_path):
+    pdf_path = _pdf_with_text(tmp_path, _READABLE)
+
+    with _patch("services.pdf_processor._ocr_pdf_page") as ocr:
+        result = extract_pdf(str(pdf_path))
+
+    ocr.assert_not_called()
+    assert result["pages"][0]["garbled_text_detected"] is False

@@ -1,0 +1,46 @@
+{
+  "pdf": "data/protocols/NCT03829514.pdf",
+  "source": "https://clinicaltrials.gov/study/NCT03829514 (Study Protocol document)",
+  "pages": 11,
+  "labelled_by": "Nam (drafted with AI assistance, spot-checked against the PDF)",
+  "notes": "Page numbers are PDF pages (first page = 1). The protocol's printed 'Page X of 10' is one lower than the PDF page because of a cover page. Pages 10-11 are references only.",
+  "trial_title": "Fenofibrate in Type 2 Diabetes- Novel Biomarkers and Mechanisms",
+  "protocol_id": "NCT03829514",
+  "inclusion_criteria": [
+    {"text": "Male or female aged ≥18 and ≤ 70 years", "page": 4},
+    {"text": "Type 2 diabetes of at least one year's duration; stable glycemic control (no more than 1.0% change in HbA1c in the previous six months, but no limit on HbA1c)", "page": 5},
+    {"text": "Triglycerides >150 mg/dL (in the previous six months)", "page": 5}
+  ],
+  "exclusion_criteria": [
+    {"text": "Previous use of Fenofibrate or other fibrates", "page": 5},
+    {"text": "Pregnancy/lactation", "page": 5},
+    {"text": "Active malignancy", "page": 5},
+    {"text": "Recent cardiac event or congestive heart failure", "page": 5},
+    {"text": "Active liver disease (LFT's > 2x's normal value)", "page": 5},
+    {"text": "Significant renal impairment (serum creatinine > 2mg/dl)", "page": 5},
+    {"text": "Current warfarin use", "page": 5}
+  ],
+  "visits": [
+    {"text": "Regularly scheduled Endocrinology clinic visit: informed consent and HIPAA form", "page": 6},
+    {"text": "Visit 1 at the SCTR NEXUS clinic", "page": 6},
+    {"text": "Visit 2 in six weeks", "page": 6}
+  ],
+  "procedures": [
+    {"text": "Physical examination", "page": 6},
+    {"text": "Women of childbearing potential will have urine β-HCG measured", "page": 6},
+    {"text": "Fasting blood (80ml) for labs: BUN, Cr, urine microalbumin, LFTs, CPK, Lipid Profile, HbA1c, TSH, C-peptide", "pages": [6, 7]},
+    {"text": "Timed morning urine sample", "pages": [6, 7]},
+    {"text": "Study medication: 160 mg fenofibrate taken orally daily for six weeks", "page": 6},
+    {"text": "Assessment of adverse events and study drug compliance by pill count", "page": 7},
+    {"text": "Plasma proteomic signature by LC-MS/MS before and after fenofibrate treatment", "page": 7}
+  ],
+  "safety_information": [
+    {"text": "Women of childbearing potential will be required to use acceptable methods for birth control throughout the study", "page": 6},
+    {"text": "Participants will receive instruction on possible side effects and proper protocol for reporting unexpected symptoms", "page": 6},
+    {"text": "Risks associated with drawing blood from the arm include momentary discomfort and/or bruising. Infection, excess bleeding, clotting, or fainting is possible, although unlikely.", "page": 8},
+    {"text": "Serious adverse events will be reported within 24 per MUSC IRB guidelines", "page": 8},
+    {"text": "If at any time the participant experiences unexplained muscle pain, tenderness or weakness, study medication should be discontinued.", "page": 9},
+    {"text": "Hazards of venipuncture: pain, bruising, inflammation or clot formation, syncope.", "page": 9},
+    {"text": "Fenofibrate use has been associated with an increased risk of muscle pain, abnormal results in tests of liver function and allergic reaction.", "page": 9}
+  ]
+}

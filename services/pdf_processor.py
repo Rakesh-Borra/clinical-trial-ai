@@ -1,4 +1,5 @@
 
+import re
 from pathlib import Path
 
 import pymupdf
@@ -6,6 +7,17 @@ import pymupdf
 
 # Short selectable text with embedded images often means incomplete extraction.
 _SUSPICIOUSLY_SHORT_CHARS = 40
+
+# Garbled-text detection (added after evaluation on real protocols).
+# Some PDFs use broken font encodings: text is selectable but scrambled,
+# e.g. "3URWRFRO" instead of "Protocol". Readable English pages in our test
+# protocols have >= 11% common function words; scrambled pages have <= 1.4%.
+_COMMON_WORDS = frozenset(
+    "the a an and or of to in on for with by is are be will was were as at "
+    "from that this which not no all any if than then each who may must".split()
+)
+_GARBLED_MIN_WORDS = 30
+_GARBLED_MAX_COMMON_RATIO = 0.04
 
 
 class PDFProcessingError(Exception):
@@ -15,6 +27,20 @@ class PDFProcessingError(Exception):
 def _has_meaningful_text(text: str) -> bool:
     """Return True when extracted text is non-empty after trimming."""
     return bool(text and text.strip())
+
+
+def _looks_garbled(text: str) -> bool:
+    """
+    Return True when selectable text looks scrambled (broken font encoding).
+
+    Uses the share of very common English words. Short pages are never
+    judged, so headers, tables of numbers and title pages are not flagged.
+    """
+    words = re.findall(r"[A-Za-z]+", text or "")
+    if len(words) < _GARBLED_MIN_WORDS:
+        return False
+    common = sum(1 for word in words if word.lower() in _COMMON_WORDS)
+    return common / len(words) < _GARBLED_MAX_COMMON_RATIO
 
 
 def _extract_selectable_text(page) -> str:
@@ -151,19 +177,30 @@ def extract_pdf(file_path: str) -> dict:
                 ocr_applied = False
                 attempted_ocr = False
 
+                garbled = _looks_garbled(selectable_text)
                 needs_ocr = (
                     not _has_meaningful_text(selectable_text)
                     or _looks_suspiciously_incomplete(page, selectable_text)
+                    or garbled
                 )
 
                 if needs_ocr:
                     attempted_ocr = True
                     try:
                         ocr_text = _ocr_pdf_page(page).strip()
-                        chosen = _choose_best_extracted_text(
-                            selectable_text,
-                            ocr_text,
-                        )
+                        if (
+                            garbled
+                            and _has_meaningful_text(ocr_text)
+                            and not _looks_garbled(ocr_text)
+                        ):
+                            # Scrambled selectable text is worse than any
+                            # readable OCR text, even if OCR is shorter.
+                            chosen = ocr_text
+                        else:
+                            chosen = _choose_best_extracted_text(
+                                selectable_text,
+                                ocr_text,
+                            )
                         if (
                             _has_meaningful_text(ocr_text)
                             and chosen == ocr_text
@@ -184,6 +221,14 @@ def extract_pdf(file_path: str) -> dict:
                             f"Page {page_number}: {exc}"
                         )
                         text = selectable_text
+
+                if garbled and not ocr_applied:
+                    warnings.append(
+                        f"Page {page_number}: selectable text looks "
+                        "scrambled (broken PDF font encoding) and OCR did "
+                        "not produce readable text (or Tesseract OCR is not "
+                        "installed). Analysis of this page is unreliable."
+                    )
 
                 if (
                     attempted_ocr
@@ -209,6 +254,7 @@ def extract_pdf(file_path: str) -> dict:
                     "character_count": len(text),
                     "requires_ocr": not _has_meaningful_text(text),
                     "ocr_applied": ocr_applied,
+                    "garbled_text_detected": garbled,
                 })
 
             return {

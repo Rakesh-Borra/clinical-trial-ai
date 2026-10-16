@@ -17,8 +17,15 @@ import streamlit as st
 
 from models.protocol_models import ProtocolAnalysis
 from services.coordinator_query import answer_from_pipeline_result
-from services.patient_query import answer_patient_from_pipeline_result
+from agents.guide_patient_agent import APPROVED_STATUS, answer_patient_from_guide
 from services.protocol_pipeline import analyze_protocol_pdf
+from ui.patient_guide_tab import (
+    clear_guide,
+    get_guide,
+    render_guide_review_tab,
+    render_published_guide,
+    term_definition_answer,
+)
 
 RESEARCH_DISCLAIMER = (
     "Research prototype for educational demonstration only. This tool does "
@@ -97,6 +104,7 @@ def clear_analysis_state(*, keep_upload: bool = False) -> None:
     st.session_state.analysis_error = None
     st.session_state.coordinator_history = []
     st.session_state.patient_history = []
+    clear_guide()
     if not keep_upload:
         st.session_state.temp_pdf_path = None
         st.session_state.uploaded_name = None
@@ -280,6 +288,13 @@ def format_display_answer_text(
     answer_text = getattr(answer, "answer_text", "") or ""
     patient_style = (audience or getattr(answer, "audience", "")) == "patient"
 
+    # Answers built from the approved Patient Guide are already written for
+    # patients; show them as they are.
+    if citations and all(
+        getattr(c, "verification_status", "") == APPROVED_STATUS for c in citations
+    ):
+        return re.sub(r"\n{3,}", "\n\n", answer_text.strip())
+
     if intent in {"medical_advice_refused", "unsupported"} or not citations:
         # Keep agent prose for refusals/empty cases; just normalize spacing.
         return re.sub(r"\n{3,}", "\n\n", answer_text.strip())
@@ -413,12 +428,28 @@ def render_protocol_summary(pipeline_result: Mapping[str, Any]) -> None:
             f"**Protocol ID:** {analysis.protocol_id or 'Not available in summary'}"
         )
 
-    if extraction_warnings or accuracy_warnings:
-        st.subheader("Warnings")
-        for warning in extraction_warnings:
-            st.warning(f"Extraction: {warning}")
-        for warning in accuracy_warnings:
-            st.warning(f"Accuracy: {warning}")
+    # Routine automatic fixes (page numbers corrected, title recovered) are
+    # collapsed; items that need a coordinator's attention stay visible.
+    routine_markers = ("corrected source_page", "recovered from labeled source")
+    attention = [f"Extraction: {w}" for w in extraction_warnings] + [
+        f"Accuracy: {w}"
+        for w in accuracy_warnings
+        if not any(marker in w for marker in routine_markers)
+    ]
+    routine = [
+        w for w in accuracy_warnings if any(marker in w for marker in routine_markers)
+    ]
+    if attention:
+        st.subheader("Needs review")
+        st.warning(
+            f"{len(attention)} item(s) could not be fully verified. "
+            "Check them against the protocol before approving patient content.\n\n"
+            + "\n".join(f"- {w}" for w in attention)
+        )
+    if routine:
+        with st.expander(f"{len(routine)} automatic correction(s) made during analysis"):
+            for warning in routine:
+                st.markdown(f"- {warning}")
 
     def _render_verified_list(
         title: str,
@@ -603,10 +634,11 @@ def render_coordinator_tab(pipeline_result: Mapping[str, Any]) -> None:
 
 
 def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
-    """Patient-friendly Q&A over the cached pipeline result."""
+    """Patient Q&A that answers only from the approved Patient Guide."""
     st.caption(
-        "Plain-language explanations of the study summary. This assistant "
-        "cannot decide personal eligibility or give medical advice."
+        "Answers use only the parts of the patient guide the study team has "
+        "approved. This assistant cannot decide personal eligibility or give "
+        "medical advice."
     )
     _render_tab_disclaimers(
         [
@@ -618,6 +650,7 @@ def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
             "situation.",
         ]
     )
+    render_published_guide()
     query = st.text_input(
         "Patient question",
         key="patient_query_input",
@@ -629,10 +662,11 @@ def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
         if not query.strip():
             st.warning("Enter a question before asking.")
         else:
-            answer = answer_patient_from_pipeline_result(
-                query.strip(),
-                pipeline_result,
-            )
+            answer = term_definition_answer(query.strip())
+            if answer is None:
+                # Patients only ever get coordinator-approved content, never
+                # the raw protocol analysis.
+                answer = answer_patient_from_guide(query.strip(), get_guide())
             st.session_state.patient_history.append(
                 {"query": query.strip(), "answer": answer}
             )
@@ -728,17 +762,31 @@ def main() -> None:
     if pipeline_result is None:
         st.markdown(
             "Upload a PDF and click **Analyze protocol** to populate the "
-            "Protocol Summary, Coordinator Assistant, and Patient Assistant tabs."
+            "Protocol Summary, Coordinator Assistant, Patient Guide Review, "
+            "and Patient Assistant tabs."
         )
         return
 
-    tab_summary, tab_coord, tab_patient = st.tabs(
-        ["Protocol Summary", "Coordinator Assistant", "Patient Assistant"]
-    )
+    tab_labels = [
+        "Protocol Summary",
+        "Coordinator Assistant",
+        "Patient Guide Review",
+        "Patient Assistant",
+    ]
+    try:
+        # Remember the selected tab, so asking a question or clicking
+        # Approve does not jump back to the first tab.
+        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(
+            tab_labels, key="main_tabs", on_change="rerun"
+        )
+    except TypeError:  # older Streamlit without stateful tabs
+        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(tab_labels)
     with tab_summary:
         render_protocol_summary(pipeline_result)
     with tab_coord:
         render_coordinator_tab(pipeline_result)
+    with tab_guide:
+        render_guide_review_tab(pipeline_result)
     with tab_patient:
         render_patient_tab(pipeline_result)
 
