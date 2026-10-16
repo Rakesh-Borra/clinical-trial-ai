@@ -1,0 +1,253 @@
+{
+  "pdf": "data/protocols/NCT02879383.pdf",
+  "seconds": 630.9,
+  "analysis": {
+    "trial_title": "Evaluation of the effect of Duodenal Mucosal",
+    "protocol_id": "| C-30000",
+    "inclusion_criteria": [
+      {
+        "description": "28-75 years of age",
+        "source_page": 9
+      },
+      {
+        "description": "Diagnosed with Type 2 Diabetes and evidence of preserved insulin secretion. Fasting insulin > 7.0 wU/mL",
+        "source_page": 9
+      },
+      {
+        "description": "HbA1c of 7.5 - 10.0% (59-86 mmol/mol)",
+        "source_page": 9
+      },
+      {
+        "description": "Body Mass Index (BMI) 24 and < 40 kg/m\u00b2",
+        "source_page": 9
+      },
+      {
+        "description": "Currently taking one or more oral glucose lowering medications, of which one must be Metformin, with no changes in dose or medication in the previous 12 weeks prior to study entry",
+        "source_page": 9
+      },
+      {
+        "description": "Able to comply with study requirements and understand and sign the informed consent",
+        "source_page": 9
+      }
+    ],
+    "exclusion_criteria": [
+      {
+        "description": "Diagnosed with Type 1 Diabetes or with a history of ketoacidosis",
+        "source_page": 9
+      },
+      {
+        "description": "Current use of Insulin",
+        "source_page": 9
+      },
+      {
+        "description": "Current use of GLP-1 analogues",
+        "source_page": 9
+      },
+      {
+        "description": "Hypoglycemia unawareness or a history of severe hypoglycemia (more than 1 severe hypoglycemic event, as defined by need for third-party-assistance, in the last year)",
+        "source_page": 9
+      },
+      {
+        "description": "Known autoimmune disease, as evidenced by a positive Anti-GAD test, including Celiac disease, or pre-existing symptoms of systemic lupus erythematosus, scleroderma or other autoimmune connective tissue disorder",
+        "source_page": 31
+      },
+      {
+        "description": "Active H. pylori infection (Participants with active H. pylori may continue with the screening process if they are treated via medication)",
+        "source_page": 9
+      },
+      {
+        "description": "HbA1c post run-in phase < 7.5% (59 mmol/mol) or > 10.0% (86 mmol/mol)",
+        "source_page": 35
+      },
+      {
+        "description": "One or more Clinically significant hypoglycemic events defined as self-monitored or laboratory plasma glucose level of < 54 mg/dL (3.0 mmol/L), or at least 2 such events if a clear correctable precipitating factor can be identified; or a severe hypoglycemic event, as defined as hypoglycemia requiring third-party-assistance, since the screening visit (Visit 1)",
+        "source_page": 10
+      },
+      {
+        "description": "Hyperglycemic event defined as three self-monitored finger sticks in 1 day during the run-in period with fasting blood glucose measurements >15 mmol/L (270 mg/dL) or non-fasting blood glucose measurements >20 mmol/L (360 mg/dL) or any combination of these. Fasting glucose hyperglycemia is not an exclusion if measured at the actual baseline visit (Visit 2) blood analysis test",
+        "source_page": 35
+      },
+      {
+        "description": "Active and uncontrolled GERD defined as grade III esophagitis or greater",
+        "source_page": 31
+      },
+      {
+        "description": "Abnormalities of the GI tract preventing endoscopic access to the duodenum",
+        "source_page": 31
+      },
+      {
+        "description": "Anatomic abnormalities in the duodenum that would preclude the completion of the DMR procedure, including tortuous anatomy",
+        "source_page": 31
+      },
+      {
+        "description": "Malignancy newly diagnosed by endoscopy",
+        "source_page": 31
+      },
+      {
+        "description": "Upper gastro-intestinal conditions such as ulcers, polyps, gastric varices, strictures, congenital or acquired intestinal telangiectasia",
+        "source_page": 31
+      }
+    ],
+    "procedures": [],
+    "visits": [],
+    "safety_information": []
+  },
+  "verification": [
+    {
+      "category": "inclusion_criteria",
+      "statement": "28-75 years of age",
+      "source_page": 9,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Diagnosed with Type 2 Diabetes and evidence of preserved insulin secretion. Fasting insulin > 7.0 wU/mL",
+      "source_page": 9,
+      "status": "not_verified"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "HbA1c of 7.5 - 10.0% (59-86 mmol/mol)",
+      "source_page": 9,
+      "status": "not_verified"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Body Mass Index (BMI) 24 and < 40 kg/m\u00b2",
+      "source_page": 9,
+      "status": "not_verified"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Currently taking one or more oral glucose lowering medications, of which one must be Metformin, with no changes in dose or medication in the previous 12 weeks prior to study entry",
+      "source_page": 9,
+      "status": "exact_match"
+    },
+    {
+      "category": "inclusion_criteria",
+      "statement": "Able to comply with study requirements and understand and sign the informed consent",
+      "source_page": 9,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Diagnosed with Type 1 Diabetes or with a history of ketoacidosis",
+      "source_page": 9,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Current use of Insulin",
+      "source_page": 9,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Current use of GLP-1 analogues",
+      "source_page": 9,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Hypoglycemia unawareness or a history of severe hypoglycemia (more than 1 severe hypoglycemic event, as defined by need for third-party-assistance, in the last year)",
+      "source_page": 9,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Known autoimmune disease, as evidenced by a positive Anti-GAD test, including Celiac disease, or pre-existing symptoms of systemic lupus erythematosus, scleroderma or other autoimmune connective tissue disorder",
+      "source_page": 31,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Active H. pylori infection (Participants with active H. pylori may continue with the screening process if they are treated via medication)",
+      "source_page": 9,
+      "status": "not_verified"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "HbA1c post run-in phase < 7.5% (59 mmol/mol) or > 10.0% (86 mmol/mol)",
+      "source_page": 35,
+      "status": "not_verified"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "One or more Clinically significant hypoglycemic events defined as self-monitored or laboratory plasma glucose level of < 54 mg/dL (3.0 mmol/L), or at least 2 such events if a clear correctable precipitating factor can be identified; or a severe hypoglycemic event, as defined as hypoglycemia requiring third-party-assistance, since the screening visit (Visit 1)",
+      "source_page": 10,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Hyperglycemic event defined as three self-monitored finger sticks in 1 day during the run-in period with fasting blood glucose measurements >15 mmol/L (270 mg/dL) or non-fasting blood glucose measurements >20 mmol/L (360 mg/dL) or any combination of these. Fasting glucose hyperglycemia is not an exclusion if measured at the actual baseline visit (Visit 2) blood analysis test",
+      "source_page": 35,
+      "status": "exact_match"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Active and uncontrolled GERD defined as grade III esophagitis or greater",
+      "source_page": 31,
+      "status": "not_verified"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Abnormalities of the GI tract preventing endoscopic access to the duodenum",
+      "source_page": 31,
+      "status": "not_verified"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Anatomic abnormalities in the duodenum that would preclude the completion of the DMR procedure, including tortuous anatomy",
+      "source_page": 31,
+      "status": "not_verified"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Malignancy newly diagnosed by endoscopy",
+      "source_page": 31,
+      "status": "not_verified"
+    },
+    {
+      "category": "exclusion_criteria",
+      "statement": "Upper gastro-intestinal conditions such as ulcers, polyps, gastric varices, strictures, congenital or acquired intestinal telangiectasia",
+      "source_page": 31,
+      "status": "not_verified"
+    }
+  ],
+  "accuracy_warnings": [
+    "Eligibility rescue triggered: running eligibility-only extraction on selected source pages.",
+    "Eligibility rescue merged 6 inclusion and 14 exclusion criterion object(s).",
+    "trial_title recovered from labeled source field: 'Evaluation of the effect of Duodenal Mucosal'.",
+    "protocol_id recovered from labeled source field: '| C-30000'.",
+    "inclusion_criteria: unsupported statement 'Diagnosed with Type 2 Diabetes and evidence of preserved insulin secretion. Fasting insulin > 7.0 wU/mL' was not found on any source page.",
+    "inclusion_criteria: unsupported statement 'HbA1c of 7.5 - 10.0% (59-86 mmol/mol)' was not found on any source page.",
+    "inclusion_criteria: unsupported statement 'Body Mass Index (BMI) 24 and < 40 kg/m\u00b2' was not found on any source page.",
+    "exclusion_criteria: corrected source_page for 'Known autoimmune disease, as evidenced by a positive Anti-GAD test, including Celiac disease, or pre-existing symptoms of systemic lupus erythematosus, scleroderma or other autoimmune connective tissue disorder' from 9 \u2192 31.",
+    "exclusion_criteria: unsupported statement 'Active H. pylori infection (Participants with active H. pylori may continue with the screening process if they are treated via medication)' was not found on any source page.",
+    "exclusion_criteria: unsupported statement 'HbA1c post run-in phase < 7.5% (59 mmol/mol) or > 10.0% (86 mmol/mol)' was not found on any source page.",
+    "exclusion_criteria: corrected source_page for 'One or more Clinically significant hypoglycemic events defined as self-monitored or laboratory plasma glucose level of < 54 mg/dL (3.0 mmol/L), or at least 2 such events if a clear correctable precipitating factor can be identified; or a severe hypoglycemic event, as defined as hypoglycemia requiring third-party-assistance, since the screening visit (Visit 1)' from 35 \u2192 10.",
+    "exclusion_criteria: ambiguous source pages [11, 33, 37] for 'Active and uncontrolled GERD defined as grade III esophagitis or greater'; left source_page=31.",
+    "exclusion_criteria: ambiguous source pages [11, 33, 37] for 'Abnormalities of the GI tract preventing endoscopic access to the duodenum'; left source_page=31.",
+    "exclusion_criteria: ambiguous source pages [11, 33, 37] for 'Anatomic abnormalities in the duodenum that would preclude the completion of the DMR procedure, including tortuous anatomy'; left source_page=31.",
+    "exclusion_criteria: ambiguous source pages [11, 33, 37] for 'Malignancy newly diagnosed by endoscopy'; left source_page=31.",
+    "exclusion_criteria: ambiguous source pages [11, 33] for 'Upper gastro-intestinal conditions such as ulcers, polyps, gastric varices, strictures, congenital or acquired intestinal telangiectasia'; left source_page=31."
+  ],
+  "extraction_warnings": [
+    "Page 83: selectable text looks scrambled (broken PDF font encoding) and OCR did not produce readable text (or Tesseract OCR is not installed). Analysis of this page is unreliable.",
+    "Page 84: selectable text looks scrambled (broken PDF font encoding) and OCR did not produce readable text (or Tesseract OCR is not installed). Analysis of this page is unreliable.",
+    "Page 85: selectable text looks scrambled (broken PDF font encoding) and OCR did not produce readable text (or Tesseract OCR is not installed). Analysis of this page is unreliable.",
+    "Page 86: selectable text looks scrambled (broken PDF font encoding) and OCR did not produce readable text (or Tesseract OCR is not installed). Analysis of this page is unreliable."
+  ],
+  "num_ctx": 16384,
+  "guide": {
+    "items": 20,
+    "passed_checks": 18,
+    "flagged": 2,
+    "flag_reasons": [
+      "The language model could not produce a rewrite (ResponseError).",
+      "These numbers from the original are missing: 2, 1",
+      "Contains medical advice or an eligibility decision: \"you cannot join\""
+    ],
+    "seconds": 583.7
+  }
+}

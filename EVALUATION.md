@@ -40,37 +40,54 @@ Answer keys (`evaluation/ground_truth/`) list **144 statements** copied from the
 | Protocol | Type | Pages | Statements in answer key | Recall | Precision | Page accuracy | Guide items passing checks |
 |---|---|---|---|---|---|---|---|
 | NCT03727854: pre-meal protein bar | Nutrition, single site | 6 | 31 | **71%** (22/31) | **100%** | **100%** | **22/22** (0 flagged) |
-| NCT03829514: fenofibrate | Drug, single site | 11 | 27 | _run_ | _run_ | _run_ | _run_ |
+| NCT03829514: fenofibrate | Drug, single site | 11 | 27 | **59%** (16/27) | **73%** | **100%** | **22/22** (0 flagged) |
 | NCT02879383: Revita DMR (stress test) | Device, 11 sites | 86 | 86 | _run_ | _run_ | _run_ | _run_ |
 
-Run on a MacBook Air (qwen3:4b via Ollama, num_ctx 16,384): extraction 11.2 min, patient guide 23.5 s.
+| **Both readable protocols combined** | | 17 | 58 | **66%** (38/58) | **86%** | **100%** | **44/44** |
 
-### What the results show (NCT03727854)
+Run on a MacBook Air (qwen3:4b via Ollama, num_ctx 16,384): extraction 11–15 min per protocol,
+patient guide under 30 s per protocol.
 
-| Category | Found / real |
-|---|---|
-| Inclusion criteria | 5/5 |
-| Exclusion criteria | 11/11 |
-| Visits | 2/3 |
-| Procedures | 4/9 |
-| Safety information | **0/3** |
+### What the results show
+
+| Category (both protocols) | Found / real | Precision |
+|---|---|---|
+| Inclusion criteria | **8/8** | 100% |
+| Exclusion criteria | **18/18** | 100% |
+| Visits | 4/6 | 100% |
+| Procedures | 7/16 | 64% |
+| Safety information | **1/10** | 33% |
 
 - **Precise, not yet complete.** Nothing was invented and every page citation was correct, but
   29% of statements were missed. The system fails by *omission*, not *fabrication*, which is the safer
   failure mode for patient information, and the reason the coordinator reviews every guide.
-- **Eligibility is strong** (16/16): the information patients ask about most.
-- **Safety statements were missed entirely.** This protocol puts them under "Rescue strategy" rather
-  than "Safety", and the model returned an empty safety list. Section-name variation is a clear
-  target for improvement (e.g. a rescue pass for safety, as already exists for eligibility).
-- **Procedures described in running text** (diet education, randomization, nurse phone calls, the
-  cereal bar itself) were missed; procedures in a list were found.
+- **Eligibility is perfect on both protocols (26/26)**: the information patients ask about most,
+  and the area that already has an extra "rescue" extraction pass.
+- **Safety information is the weakest area (1/10).** Protocols spread safety content across
+  differently named sections ("Rescue strategy", "Risks to Subjects", "Withdrawal of Subjects"), and
+  the model either returned nothing (protein bar) or picked general statements instead of the
+  specific risks (fenofibrate). Clear next step: a safety rescue pass, like the eligibility one.
+- **Procedures lose their numbers.** On fenofibrate the model found the study drug and the blood
+  draw but wrote "Study medication administration" without the **160 mg** dose and "Fasting blood
+  draw" without the **80 ml** volume. These count as misses, because dropping a dose is a real error.
+  Procedures described in running text (diet education, randomization, nurse phone calls) were also missed.
+- **Page citations are always right (38/38)**, so a coordinator can check any statement in seconds.
+- **The patient guide passed its own checks on every item (44/44)**: no number dropped or changed,
+  no advice or eligibility wording. Its quality is bounded by what extraction finds.
+
+**Reviewed exception (not counted).** One fenofibrate safety statement the model returned is valid
+but missing from the answer key: *"Adverse events anticipated in this study … potential side effects
+of fenofibrate (for example myalgias, elevation of liver enzymes) are few"* (p. 8). Counting it would
+raise fenofibrate precision from 73% to 77%. We report the strict number.
 
 **Scoring note.** After the first run we found two scorer problems and fixed them before scoring
 any other protocol: visits were compared together with their procedure lists, and short names
 ("Blood tests") did not match the detailed answer-key wording. The scorer now compares visit name +
 timing, accepts a shorter name whose words all appear in the answer key, and ignores digits inside
 words (HbA1c, kg/m2). Score before the fix: 65% recall / 91% precision; after: 71% / 100%.
-The answer key itself was not changed.
+One fenofibrate answer-key entry had been paraphrased ("urine β-HCG pregnancy test") instead of
+copied; it was corrected to the protocol's own words. It still does not match the model's output,
+so the score did not change.
 
 ### Found while building the evaluation (before any model run)
 

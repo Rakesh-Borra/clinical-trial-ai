@@ -12,6 +12,8 @@ Ground truth was labelled by hand from each protocol PDF (`evaluation/ground_tru
 
 | Protocol | Pages | Time | Recall | Precision | Page accuracy | Verified on page | PDF warnings |
 |---|---|---|---|---|---|---|---|
+| NCT02879383 | 86 | 10.5 min | 23% (20/86) | 100% | 15% | 10/20 | 4 |
+| NCT03727854 | 6 | 11.2 min | 71% (22/31) | 100% | 100% | 22/22 | 0 |
 | NCT03829514 | 11 | 15.0 min | 59% (16/27) | 73% | 100% | 18/22 | 0 |
 
 Model context window (num_ctx): 16384 tokens.
@@ -20,23 +22,127 @@ Model context window (num_ctx): 16384 tokens.
 
 | Category | Found / real | Recall | Precision | Page accuracy |
 |---|---|---|---|---|
-| Inclusion criteria | 3/3 | 100% | 100% | 100% |
-| Exclusion criteria | 7/7 | 100% | 100% | 100% |
-| Visits | 2/3 | 67% | 100% | 100% |
-| Procedures | 3/7 | 43% | 43% | 100% |
-| Safety information | 1/7 | 14% | 33% | 100% |
+| Inclusion criteria | 14/14 | 100% | 100% | 57% |
+| Exclusion criteria | 32/51 | 63% | 100% | 66% |
+| Visits | 4/24 | 17% | 100% | 100% |
+| Procedures | 7/31 | 23% | 64% | 100% |
+| Safety information | 1/24 | 4% | 33% | 100% |
 
 ## Plain-language Patient Guide
 
 | Protocol | Items | Passed checks | Flagged for review | Time |
 |---|---|---|---|---|
+| NCT02879383 | 20 | 18 (90%) | 2 | 583.7 s |
+| NCT03727854 | 22 | 22 (100%) | 0 | 23.5 s |
 | NCT03829514 | 22 | 22 (100%) | 0 | 28.3 s |
+
+Why items were flagged:
+
+- Contains medical advice or an eligibility decision: "you cannot join"
+- The language model could not produce a rewrite (ResponseError).
+- These numbers from the original are missing: 2, 1
 
 ## Failure cases (missed or extra statements)
 
+### NCT02879383
+- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Able to comply with study requirements and understand and sign the informed consent
+- **Wrong page** (Inclusion criteria): cited p.9, real p.31: HbA1c of 7.5 - 10.0% (59-86 mmol/mol)
+- **Wrong page** (Inclusion criteria): cited p.9, real p.31: 28-75 years of age
+- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Currently taking one or more oral glucose lowering medications, of which one must be Metformin, with no changes in medication in the previous 12 weeks prior to study entry
+- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Diagnosed with Type 2 Diabetes and evidence of preserved insulin secretion. Fasting insulin > 7.0 µU/mL.
+- **Wrong page** (Inclusion criteria): cited p.9, real p.31: Body Mass Index (BMI) ≥ 24 and ≤ 40 kg/m2
+- **Missed** (Exclusion criteria, p.32): Previous GI surgery that could affect the ability to treat the duodenum such as subjects who have had a Bilroth 2, Roux-en-Y gastric bypass, or other similar procedures or conditions
+- **Missed** (Exclusion criteria, p.32): History of chronic or acute pancreatitis
+- **Missed** (Exclusion criteria, p.32): Known active hepatitis or active liver disease
+- **Missed** (Exclusion criteria, p.32): Symptomatic gallstones or kidney stones, acute cholecystitis or history of duodenal inflammatory diseases including Crohn's Disease and Celiac Disease
+- **Missed** (Exclusion criteria, p.32): History of coagulopathy, upper gastro-intestinal bleeding conditions such as ulcers, gastric varices, strictures, congenital or acquired intestinal telangiectasia
+- **Missed** (Exclusion criteria, p.32): Use of anticoagulation therapy (such as warfarin) which cannot be discontinued for 7 days before and 14 days after the procedure
+- **Missed** (Exclusion criteria, p.32): Use of P2Y12 inhibitors (clopidogrel, pasugrel, ticagrelor) which cannot be discontinued for 14 days before and 14 days after the procedure. Use of aspirin is allowed.
+- **Missed** (Exclusion criteria, p.32): Unable to discontinue NSAIDs (non-steroidal anti-inflammatory drugs) during treatment through 4 weeks post procedure phase
+- **Missed** (Exclusion criteria, p.32): Taking corticosteroids or drugs known to affect GI motility (e.g. Metoclopramide)
+- **Missed** (Exclusion criteria, p.32): Receiving weight loss medications such as Meridia, Xenical, or over the counter weight loss medications
+- **Missed** (Exclusion criteria, p.32): Persistent Anemia, defined as Hgb<10 g/dl
+- **Missed** (Exclusion criteria, p.32): eGFR or MDRD <30 ml/min/1.73m2
+- **Missed** (Exclusion criteria, p.32): Active systemic infection
+- **Missed** (Exclusion criteria, p.32): Active malignancy within the last 5 years
+- **Missed** (Exclusion criteria, p.32): Not potential candidates for surgery or general anesthesia
+- **Missed** (Exclusion criteria, p.32): Active illicit substance abuse or alcoholism
+- **Missed** (Exclusion criteria, p.32): Participating in another ongoing clinical trial of an investigational drug or device
+- **Missed** (Exclusion criteria, p.32): Any other mental or physical condition which, in the opinion of the Investigator, makes the subject a poor candidate for clinical trial participation
+- **Missed** (Exclusion criteria, p.33): Those who are pregnant, nursing or expect to become pregnant over the course of the study
+- **Wrong page** (Exclusion criteria): cited p.31, real p.33: Upper gastro-intestinal conditions such as ulcers, polyps, gastric varices, strictures, congenital or acquired intestinal telangiectasia
+- **Wrong page** (Exclusion criteria): cited p.31, real p.33: Malignancy newly diagnosed by endoscopy
+- **Wrong page** (Exclusion criteria): cited p.31, real p.33: Anatomic abnormalities in the duodenum that would preclude the completion of the DMR procedure, including tortuous anatomy
+- **Wrong page** (Exclusion criteria): cited p.31, real p.33: Abnormalities of the GI tract preventing endoscopic access to the duodenum
+- **Wrong page** (Exclusion criteria): cited p.31, real p.33: Active and uncontrolled GERD defined as grade III esophagitis or greater
+- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Active H.pylori infection (Participants with active H. pylori may continue with the screening process if they are treated via medication)
+- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Hypoglycemia unawareness or a history of severe hypoglycemia (more than 1 severe hypoglycemic event, as defined by need for third-party-assistance, in the last year)
+- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Current use of GLP-1 analogues
+- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Current use of Insulin
+- **Wrong page** (Exclusion criteria): cited p.9, real p.31: Diagnosed with Type 1 Diabetes or with a history of ketoacidosis
+- **Wrong page** (Exclusion criteria): cited p.10, real p.32: One or more Clinically significant hypoglycemic events defined as self-monitored or laboratory plasma glucose level of < 54 mg/dL (3.0 mmol/L), or a severe hypoglycemic event requiring third-party-assistance, since the screening visit (Visit 1)
+- **Missed** (Visits, p.33): Visit 1: Screening (Pre-Medication Run-In)
+- **Missed** (Visits, p.34): Visit 2: Baseline (Post Medication Run-In), 4-6 weeks after screening
+- **Missed** (Visits, p.37): Visit 2A: Ambulatory Blood Pressure Monitor Return
+- **Missed** (Visits, p.37): Visit 3: Procedure
+- **Missed** (Visits, p.40): Visit 4: 7 Day Phone Call
+- **Missed** (Visits, p.40): Visit 5: 14 Day Phone Call
+- **Missed** (Visits, p.41): Visit 6: 4 Week (28 Day) Clinic Visit
+- **Missed** (Visits, p.42): Visit 7: 12 Week (84 Days) Clinic Visit
+- **Missed** (Visits, p.43): Visit 7A: Ambulatory Blood Pressure Monitor Return
+- **Missed** (Visits, p.44): Visit 7.1: 15 Week (105 Day) Phone Call
+- **Missed** (Visits, p.44): Visit 8: 18 Week (126 Day) Clinic Visit
+- **Missed** (Visits, p.45): Visit 8.1: 21 Week (147 Day) Phone Call
+- **Missed** (Visits, p.46): Visit 9: 24 Week (168 Day) Clinic Visit
+- **Missed** (Visits, p.47): Visit 3C: Cross-over to DMR Visit (0-14 days from Visit 9)
+- **Missed** (Visits, p.48): Visit 9.1: 30 Week (210 Day) Phone Call
+- **Missed** (Visits, p.48): Visit 10: 36 Week (252 Day) Clinic Visit
+- **Missed** (Visits, p.49): Visit 10.1: 42 Week (294 Day) Phone Call
+- **Missed** (Visits, p.50): Visit 11: 48 Week (336 Day) Clinic Visit
+- **Missed** (Procedures, p.33): Demographics, medical history and full physical exam
+- **Missed** (Procedures, p.52): Targeted physical exam
+- **Missed** (Procedures, p.33): Blood analysis
+- **Missed** (Procedures, p.34): H. pylori test
+- **Missed** (Procedures, p.34): Oral anti-diabetic medication run-in (4 weeks)
+- **Missed** (Procedures, p.34): Subject self-monitored blood glucose (SMBG) and glycemia diary
+- **Missed** (Procedures, p.34): Nutritional counseling
+- **Missed** (Procedures, p.54): Urinary Protein Excretion (UPE) test
+- **Missed** (Procedures, p.55): Mixed Meal Tolerance Test (MMTT)
+- **Missed** (Procedures, p.55): Ambulatory Blood Pressure Monitoring (ABPM)
+- **Missed** (Procedures, p.56): Liver MRI: Magnetic Resonance-Proton Density Fat Fraction (MR-PDFF) and Magnetic Resonance Liver Iron Content (MR-LIC)
+- **Missed** (Procedures, p.37): Endoscopic evaluation of the esophagus, stomach and duodenum
+- **Missed** (Procedures, p.38): Randomization 1:1 to DMR procedure or sham procedure
+- **Missed** (Procedures, p.38): Duodenal Mucosal Resurfacing (DMR) procedure using the Revita System
+- **Missed** (Procedures, p.38): Sham procedure: Revita catheter placed in the stomach for 30 minutes and removed
+- **Missed** (Safety information, p.22): abdominal tightness, cramping, pain
+- **Missed** (Safety information, p.22): diarrhea
+- **Missed** (Safety information, p.22): difficulty swallowing
+- **Missed** (Safety information, p.22): infection
+- **Missed** (Safety information, p.22): mucosal injury to GI tract
+- **Missed** (Safety information, p.23): pancreatitis
+- **Missed** (Safety information, p.23): perforation
+- **Missed** (Safety information, p.23): sore throat
+- **Missed** (Safety information, p.23): stricture
+- **Missed** (Safety information, p.23): transient bleeding
+- **Missed** (Safety information, p.23): worsening diabetic symptoms including hypoglycemia
+- **Missed** (Safety information, p.34): AEs are collected from the time the Informed Consent is signed.
+- **Missed** (Safety information, p.62): Glucose alert value <70 mg/dL (3.9 mmol/L): sufficiently low for treatment with fast-acting carbohydrate
+- **Missed** (Safety information, p.62): Clinically significant hypoglycemia <54 mg/dL (3.0 mmol/L)
+
+### NCT03727854
+- **Missed** (Visits, p.4): 1st visit date, study start
+- **Missed** (Procedures, p.4): Diabetes dietary education
+- **Missed** (Procedures, p.4): Randomization
+- **Missed** (Procedures, p.4): Protein-enriched cereal bar consumed 15 minutes before meals
+- **Missed** (Procedures, p.4): Research nurse calls the subjects every four weeks to check compliance
+- **Missed** (Procedures, p.5): Fasting blood glucose sampling and body measurements at 12 weeks
+- **Missed** (Safety information, p.4): Subjects should not change their existing diabetes medications and doses during the study period.
+- **Missed** (Safety information, p.5): If the blood glucose level is more than 270 mg/dL at week 0-6, or more than 240 mg/dL at week 7-12 for three consecutive days, subjects were required to contact the clinical trial center to determine whether a visit is necessary.
+- **Missed** (Safety information, p.5): If the subject experience more than one hypoglycemia (less than 70 mg/dL), they are required to contact the clinical trial center to determine if a visit is necessary.
+
 ### NCT03829514
 - **Missed** (Visits, p.6): Regularly scheduled Endocrinology clinic visit: informed consent and HIPAA form
-- **Missed** (Procedures, p.6): Urine β-HCG pregnancy test for women of childbearing potential
+- **Missed** (Procedures, p.6): Women of childbearing potential will have urine β-HCG measured
 - **Missed** (Procedures, p.6): Fasting blood (80ml) for labs: BUN, Cr, urine microalbumin, LFTs, CPK, Lipid Profile, HbA1c, TSH, C-peptide
 - **Missed** (Procedures, p.6): Study medication: 160 mg fenofibrate taken orally daily for six weeks
 - **Missed** (Procedures, p.7): Plasma proteomic signature by LC-MS/MS before and after fenofibrate treatment

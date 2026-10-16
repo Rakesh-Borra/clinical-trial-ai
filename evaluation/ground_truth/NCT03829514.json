@@ -27,7 +27,7 @@
   ],
   "procedures": [
     {"text": "Physical examination", "page": 6},
-    {"text": "Urine β-HCG pregnancy test for women of childbearing potential", "page": 6},
+    {"text": "Women of childbearing potential will have urine β-HCG measured", "page": 6},
     {"text": "Fasting blood (80ml) for labs: BUN, Cr, urine microalbumin, LFTs, CPK, Lipid Profile, HbA1c, TSH, C-peptide", "pages": [6, 7]},
     {"text": "Timed morning urine sample", "pages": [6, 7]},
     {"text": "Study medication: 160 mg fenofibrate taken orally daily for six weeks", "page": 6},
