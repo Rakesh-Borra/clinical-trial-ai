@@ -485,19 +485,41 @@ def edit_item(item: GuideItem, new_text: str) -> List[str]:
         item.plain_text = new_text
         item.generated_by = "coordinator"
         item.approved = False
+        item.rejected = False
     item.needs_review = bool(warnings)
     item.review_reasons = warnings
     return warnings
 
 
+REJECTED_REASON = "Marked not accurate by the coordinator."
+
+
 def approve_item(item: GuideItem) -> None:
     """Mark one item as approved by the coordinator."""
     item.approved = True
+    if item.rejected:
+        item.rejected = False
+        item.review_reasons = [r for r in item.review_reasons if r != REJECTED_REASON]
+        item.needs_review = bool(item.review_reasons)
 
 
 def unapprove_item(item: GuideItem) -> None:
     """Withdraw approval for one item."""
     item.approved = False
+
+
+def reject_item(item: GuideItem) -> None:
+    """
+    Mark one item as not accurate.
+
+    A rejected item is hidden from patients and flagged for review until the
+    coordinator edits and approves it.
+    """
+    item.approved = False
+    item.rejected = True
+    item.needs_review = True
+    if REJECTED_REASON not in item.review_reasons:
+        item.review_reasons.append(REJECTED_REASON)
 
 
 def approve_all_unflagged(guide: PatientGuide) -> int:

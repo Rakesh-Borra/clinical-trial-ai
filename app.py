@@ -17,15 +17,14 @@ import streamlit as st
 
 from models.protocol_models import ProtocolAnalysis
 from services.coordinator_query import answer_from_pipeline_result
-from agents.guide_patient_agent import APPROVED_STATUS, answer_patient_from_guide
+from agents.guide_patient_agent import APPROVED_STATUS
+from models.protocol_models import ProtocolAnalysis
+from services.coordinator_query import answer_from_pipeline_result
 from services.protocol_pipeline import analyze_protocol_pdf
-from ui.patient_guide_tab import (
-    clear_guide,
-    get_guide,
-    render_guide_review_tab,
-    render_published_guide,
-    term_definition_answer,
-)
+from ui import theme
+from ui.landing import COORDINATOR, NAME_KEY, PATIENT, ROLE_KEY, render_landing, render_top_bar
+from ui.patient_guide_tab import clear_guide, get_guide, render_guide_review_tab
+from ui.patient_view import render_patient_workspace
 
 RESEARCH_DISCLAIMER = (
     "Research prototype for educational demonstration only. This tool does "
@@ -91,6 +90,9 @@ def init_session_state() -> None:
         "uploaded_fingerprint": None,
         "coordinator_history": [],
         "patient_history": [],
+        ROLE_KEY: None,
+        NAME_KEY: "",
+        "doc_type": DOC_TYPES[0],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -633,51 +635,211 @@ def render_coordinator_tab(pipeline_result: Mapping[str, Any]) -> None:
         st.divider()
 
 
-def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
-    """Patient Q&A that answers only from the approved Patient Guide."""
-    st.caption(
-        "Answers use only the parts of the patient guide the study team has "
-        "approved. This assistant cannot decide personal eligibility or give "
-        "medical advice."
-    )
-    _render_tab_disclaimers(
-        [
-            "This assistant explains general information from a clinical trial "
-            "protocol summary for educational purposes only. It is not medical "
-            "advice.",
-            "It cannot decide whether you are eligible for a study. Talk with "
-            "the study team or a qualified clinician about your personal "
-            "situation.",
-        ]
-    )
-    render_published_guide()
-    query = st.text_input(
-        "Patient question",
-        key="patient_query_input",
-        placeholder="e.g. Who can join this study?",
-    )
-    ask = st.button("Ask patient assistant", key="patient_ask_btn")
+DOC_TYPES = [
+    "Clinical trial protocol",
+    "Informed consent form",
+    "Investigator's brochure",
+    "Other study document",
+]
+STEPS = ["1 · Upload", "2 · Summary", "3 · Review", "4 · Publish"]
 
-    if ask:
-        if not query.strip():
-            st.warning("Enter a question before asking.")
-        else:
-            answer = term_definition_answer(query.strip())
-            if answer is None:
-                # Patients only ever get coordinator-approved content, never
-                # the raw protocol analysis.
-                answer = answer_patient_from_guide(query.strip(), get_guide())
-            st.session_state.patient_history.append(
-                {"query": query.strip(), "answer": answer}
+
+def _need_analysis() -> bool:
+    """Show a friendly note and return True when no document is analysed yet."""
+    if st.session_state.pipeline_result is not None:
+        return False
+    st.info("Start with step 1: upload a document and click **Analyze**.")
+    return True
+
+
+def _go_to(step: str) -> None:
+    st.session_state["_coord_goto"] = step
+    st.rerun()
+
+
+def render_upload_step() -> None:
+    """Step 1: upload a PDF, say what kind of document it is, run the analysis."""
+    left, right = st.columns([1.25, 1], gap="large")
+
+    with right:
+        with st.container(key="doctype_card"):
+            st.html('<div class="ctai-label">Step 1b</div><h3 style="margin:0 0 .4rem">What type of document is this?</h3>')
+            doc_type = st.selectbox(
+                "Document type",
+                DOC_TYPES,
+                key="doc_type",
+                label_visibility="collapsed",
+            )
+            if doc_type == DOC_TYPES[0]:
+                st.success(
+                    "Best supported. Clinical Trial AI was built and tested on "
+                    "trial protocols."
+                )
+            else:
+                st.warning(
+                    "This prototype is tuned for trial protocols. Other documents "
+                    "can be analysed, but expect more items to need your review."
+                )
+
+    with left:
+        with st.container(key="upload_card"):
+            st.html('<div class="ctai-label">Step 1a</div><h3 style="margin:0 0 .4rem">Upload your document</h3>')
+            uploaded = st.file_uploader(
+                "Document (PDF)",
+                type=["pdf"],
+                label_visibility="collapsed",
+                help="Select a clinical trial document as a PDF. Analysis may take several minutes.",
             )
 
-    for item in reversed(st.session_state.patient_history):
-        st.markdown(f"#### Q: {item['query']}")
-        _render_answer_block(
-            item["answer"],
-            audience=getattr(item["answer"], "audience", "patient"),
-        )
-        st.divider()
+            if uploaded is not None:
+                fingerprint = upload_fingerprint(uploaded)
+                if fingerprint != st.session_state.uploaded_fingerprint:
+                    clear_analysis_state(keep_upload=False)
+                    temp_path = persist_uploaded_pdf(uploaded)
+                    st.session_state.temp_pdf_path = temp_path
+                    st.session_state.uploaded_name = uploaded.name
+                    st.session_state.uploaded_fingerprint = fingerprint
+
+                st.success(f"Ready to analyze: **{st.session_state.uploaded_name}**")
+
+                analyze_clicked = st.button(
+                    "Analyze protocol",
+                    type="primary",
+                    key="analyze_btn",
+                    disabled=st.session_state.pipeline_result is not None,
+                )
+
+                if analyze_clicked and st.session_state.pipeline_result is None:
+                    st.session_state.analysis_error = None
+                    progress = st.progress(0, text="Preparing analysis…")
+                    status = st.empty()
+                    try:
+                        progress.progress(15, text="Saving upload and starting pipeline…")
+                        status.info(
+                            "Running PDF extraction, focused protocol analysis, "
+                            "accuracy checks, and source verification. This can take "
+                            "several minutes with the local Ollama model."
+                        )
+                        progress.progress(40, text="Analyzing document (Ollama)…")
+                        result = run_protocol_analysis(st.session_state.temp_pdf_path)
+                        progress.progress(100, text="Analysis complete.")
+                        st.session_state.pipeline_result = result
+                        st.session_state.analysis_error = None
+                    except Exception as exc:  # noqa: BLE001 — surface all analyze failures
+                        st.session_state.pipeline_result = None
+                        st.session_state.analysis_error = format_analysis_error(exc)
+                        progress.progress(0, text="Analysis failed.")
+                        status.empty()
+                    else:
+                        _go_to(STEPS[1])
+
+                if st.session_state.analysis_error:
+                    st.error(st.session_state.analysis_error)
+
+                if st.button("Clear analysis / start over", key="clear_analysis_btn"):
+                    clear_analysis_state(keep_upload=False)
+                    st.rerun()
+
+            elif st.session_state.pipeline_result is not None:
+                st.caption(
+                    f"Using cached analysis for **{st.session_state.uploaded_name}**. "
+                    "Upload a new PDF to replace it."
+                )
+                if st.button("Continue to the summary", type="primary", key="continue_summary_btn"):
+                    _go_to(STEPS[1])
+
+
+def render_summary_step() -> None:
+    """Step 2: what the AI found in the document."""
+    if _need_analysis():
+        return
+    result = st.session_state.pipeline_result
+    st.html(
+        '<div class="ctai-chip-row" style="justify-content:flex-start;margin-bottom:.6rem">'
+        f'{theme.chip(st.session_state.doc_type, "lav")}'
+        f'{theme.chip(st.session_state.uploaded_name or "Cached analysis", "grey")}</div>'
+    )
+    st.caption(
+        "This is what the AI found, with the page each item came from. "
+        "Next, it turns these into plain-language statements for you to check."
+    )
+    render_protocol_summary(result)
+    if st.button("Continue to review statements", type="primary", key="continue_review_btn"):
+        _go_to(STEPS[2])
+
+
+def render_review_step() -> None:
+    """Step 3: mark each generated statement accurate or not, then approve."""
+    if _need_analysis():
+        return
+    render_guide_review_tab(st.session_state.pipeline_result)
+
+
+def render_publish_step() -> None:
+    """Step 4: see what patients can read, preview it, ask coordinator questions."""
+    if _need_analysis():
+        return
+    guide = get_guide()
+    if guide is None:
+        st.info("Generate and review the statements in step 3 first. Nothing is published yet.")
+        return
+
+    total = len(guide.all_items())
+    approved = guide.approved_count()
+    theme.metrics_row([
+        ("Visible to patients", f"{approved} / {total}", False),
+        ("Still hidden", total - approved, total - approved > 0),
+        ("Rejected", guide.rejected_count(), guide.rejected_count() > 0),
+        ("Document type", st.session_state.doc_type.split(" ")[0], False),
+    ])
+    theme.progress_bar(approved / total if total else 0)
+    if approved == 0:
+        st.warning("Patients cannot see anything yet. Approve at least one statement in step 3.")
+    elif approved < total:
+        st.info("Patients can see the approved statements. The others stay hidden until you approve them.")
+    else:
+        st.success("Everything is approved and visible to patients.")
+
+    c1, c2, _ = st.columns([1.4, 1.4, 2])
+    if c1.button("Preview as a patient", type="primary", key="preview_patient_btn"):
+        st.session_state[ROLE_KEY] = PATIENT
+        st.rerun()
+    if c2.button("Back to review", key="back_review_btn"):
+        _go_to(STEPS[2])
+
+    st.html('<div class="ctai-section-title" style="text-align:left;margin-top:1.6rem"><p>For you</p><h2>Ask about the protocol</h2></div>')
+    render_coordinator_tab(st.session_state.pipeline_result)
+
+
+def render_coordinator_workspace() -> None:
+    render_top_bar(COORDINATOR)
+
+    name = st.session_state.get(NAME_KEY) or ""
+    theme.page_head(
+        f"Welcome, {name}" if name else "Coordinator workspace",
+        "Upload a document, check what the AI found, then approve what patients will read.",
+    )
+
+    # Move to a step requested by a button on the previous run (a widget's
+    # value can only be changed before the widget is drawn).
+    goto = st.session_state.pop("_coord_goto", None)
+    if goto in STEPS:
+        st.session_state["coord_step"] = goto
+    st.session_state.setdefault("coord_step", STEPS[0])
+
+    step = st.segmented_control(
+        "Step", STEPS, key="coord_step", required=True, label_visibility="collapsed"
+    ) or STEPS[0]
+
+    st.write("")
+    if step == STEPS[0]:
+        render_upload_step()
+    elif step == STEPS[1]:
+        render_summary_step()
+    elif step == STEPS[2]:
+        render_review_step()
+    else:
+        render_publish_step()
 
 
 def main() -> None:
@@ -687,108 +849,18 @@ def main() -> None:
         layout="wide",
     )
     init_session_state()
+    theme.inject_css()
 
-    st.title("Clinical Trial AI")
-    st.markdown(
-        "Upload a clinical trial protocol PDF, extract a verified summary, "
-        "then ask coordinator or patient questions without re-running analysis."
-    )
-    render_disclaimer()
-
-    uploaded = st.file_uploader(
-        "Protocol PDF",
-        type=["pdf"],
-        help="Select a clinical trial protocol PDF. Analysis may take several minutes.",
-    )
-
-    if uploaded is not None:
-        fingerprint = upload_fingerprint(uploaded)
-        if fingerprint != st.session_state.uploaded_fingerprint:
-            clear_analysis_state(keep_upload=False)
-            temp_path = persist_uploaded_pdf(uploaded)
-            st.session_state.temp_pdf_path = temp_path
-            st.session_state.uploaded_name = uploaded.name
-            st.session_state.uploaded_fingerprint = fingerprint
-
-        st.success(f"Ready to analyze: **{st.session_state.uploaded_name}**")
-
-        analyze_clicked = st.button(
-            "Analyze protocol",
-            type="primary",
-            disabled=st.session_state.pipeline_result is not None,
-        )
-
-        if analyze_clicked and st.session_state.pipeline_result is None:
-            st.session_state.analysis_error = None
-            progress = st.progress(0, text="Preparing protocol analysis…")
-            status = st.empty()
-            try:
-                progress.progress(15, text="Saving upload and starting pipeline…")
-                status.info(
-                    "Running PDF extraction, focused protocol analysis, "
-                    "accuracy checks, and source verification. This can take "
-                    "several minutes with the local Ollama model."
-                )
-                progress.progress(40, text="Analyzing protocol (Ollama)…")
-                result = run_protocol_analysis(st.session_state.temp_pdf_path)
-                progress.progress(100, text="Analysis complete.")
-                st.session_state.pipeline_result = result
-                st.session_state.analysis_error = None
-                status.success(
-                    "Analysis complete. Results are cached for this upload — "
-                    "asking questions will not re-run PDF analysis."
-                )
-            except Exception as exc:  # noqa: BLE001 — surface all analyze failures
-                st.session_state.pipeline_result = None
-                st.session_state.analysis_error = format_analysis_error(exc)
-                progress.progress(0, text="Analysis failed.")
-                status.empty()
-
-        if st.session_state.analysis_error:
-            st.error(st.session_state.analysis_error)
-
-        if st.button("Clear analysis / start over"):
-            clear_analysis_state(keep_upload=False)
-            st.rerun()
-
+    role = st.session_state.get(ROLE_KEY)
+    if role == COORDINATOR:
+        render_coordinator_workspace()
+    elif role == PATIENT:
+        render_patient_workspace()
     else:
-        if st.session_state.pipeline_result is not None:
-            st.caption(
-                f"Using cached analysis for **{st.session_state.uploaded_name}**. "
-                "Upload a new PDF to replace it."
-            )
+        render_landing()
 
-    pipeline_result = st.session_state.pipeline_result
-    if pipeline_result is None:
-        st.markdown(
-            "Upload a PDF and click **Analyze protocol** to populate the "
-            "Protocol Summary, Coordinator Assistant, Patient Guide Review, "
-            "and Patient Assistant tabs."
-        )
-        return
-
-    tab_labels = [
-        "Protocol Summary",
-        "Coordinator Assistant",
-        "Patient Guide Review",
-        "Patient Assistant",
-    ]
-    try:
-        # Remember the selected tab, so asking a question or clicking
-        # Approve does not jump back to the first tab.
-        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(
-            tab_labels, key="main_tabs", on_change="rerun"
-        )
-    except TypeError:  # older Streamlit without stateful tabs
-        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(tab_labels)
-    with tab_summary:
-        render_protocol_summary(pipeline_result)
-    with tab_coord:
-        render_coordinator_tab(pipeline_result)
-    with tab_guide:
-        render_guide_review_tab(pipeline_result)
-    with tab_patient:
-        render_patient_tab(pipeline_result)
+    if role:
+        st.caption(RESEARCH_DISCLAIMER)
 
 
 if __name__ == "__main__":

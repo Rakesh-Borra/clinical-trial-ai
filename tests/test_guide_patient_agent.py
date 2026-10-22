@@ -420,11 +420,10 @@ def test_app_patient_assistant_hides_unapproved_items():
     }
     with patch("agents.plain_language_agent.ollama_rewriter", side_effect=_fake_rewriter):
         at.session_state["patient_guide"] = _approve_age_only(_guide())
+    at.session_state["role"] = "patient"
     at.run()
 
-    at.text_input(key="patient_query_input").input("Who can join this study?")
-    next(b for b in at.button if b.key == "patient_ask_btn").click()
-    at.run()
+    at.chat_input(key="patient_chat_input").set_value("Who can join this study?").run()
 
     assert not at.exception
     answer = at.session_state["patient_history"][-1]["answer"]
