@@ -260,18 +260,19 @@ If the terminal prints a different Local URL, use that URL instead.
 
 ## 9. First-time walkthrough
 
-1. Open the Streamlit app.
-2. Upload the demo PDF: **`data/sample_clinical_protocol.pdf`**
-3. Click **Analyze protocol**.
-4. Wait for analysis to finish. **The first analysis can take several minutes** on a laptop because it runs local `qwen3:4b` extraction passes. Progress text in the UI explains that Q&A will not re-run analysis.
-5. Explore the four tabs:
+1. Open the Streamlit app. You land on the **Welcome to Clinical Trial AI** page.
+2. Choose **Sign in as coordinator** (demo sign-in: no password).
+3. **Step 1 · Upload**: upload **`data/sample_clinical_protocol.pdf`**, pick the document type, click **Analyze protocol**. **The first analysis can take several minutes** on a laptop because it runs local `qwen3:4b` extraction passes.
+4. Walk through the four steps:
 
-| Tab | What to look for |
-|-----|------------------|
-| **Protocol Summary** | Title/ID, inclusion/exclusion, visits, procedures, safety, verification statuses, warnings |
-| **Coordinator Assistant** | Staff-oriented factual answers with citations |
-| **Patient Guide Review** | Click **Generate patient guide**, check flagged items, edit wording, **Approve** |
-| **Patient Assistant** | The approved guide, "What does … mean?" answers, safe refusals |
+| Step | What to look for |
+|------|------------------|
+| **1 · Upload** | Choose the document type; analyze once |
+| **2 · Summary** | Title/ID, inclusion/exclusion, visits, procedures, safety, warnings, with page numbers |
+| **3 · Review** | **Generate patient statements**, then mark each one accurate (**Yes, approve**) or **No, reject**; edit wording |
+| **4 · Publish** | Counts, coordinator Q&A, **Preview as a patient** |
+
+5. Click **Switch role** and sign in as a **patient**: the approved study guide is on the left and an adjustable chat assistant is on the right. Roles share data only inside the same browser session.
 
 ### Example questions
 
@@ -353,7 +354,10 @@ clinical-trial-ai/
 │   ├── patient_agent.py             # Deterministic patient Q&A + safe refusals
 │   └── plain_language_agent.py      # Patient guide: rewrite → check → retry → flag
 ├── ui/
-│   └── patient_guide_tab.py    # Patient Guide Review + approved patient view
+│   ├── theme.py                # Colors, CSS, logo/illustrations
+│   ├── landing.py              # Welcome page, role sign-in, top bar
+│   ├── patient_view.py         # Patient workspace: guide left, chat right
+│   └── patient_guide_tab.py    # Statement review (approve / reject / edit)
 ├── services/
 │   ├── pdf_processor.py        # PDF text + OCR fallback
 │   ├── protocol_pipeline.py    # analyze_protocol_pdf()
@@ -458,5 +462,5 @@ Then open a **Pull Request** on GitHub from your branch toward `main` (or the br
 6. [ ] `python -m streamlit run app.py`
 7. [ ] Upload `data/sample_clinical_protocol.pdf` → **Analyze protocol**
 8. [ ] Ask coordinator/patient questions; confirm eligibility refusal is safe
-9. [ ] **Patient Guide Review** → Generate → Approve; check the **Patient Assistant** tab shows only approved items
+9. [ ] **Patient Guide Review** → Generate → Approve; open **Preview as a patient** and check only approved items appear
 10. [ ] `python -m pytest -q`
