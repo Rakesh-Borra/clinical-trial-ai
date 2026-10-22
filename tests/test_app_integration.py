@@ -172,6 +172,42 @@ def test_format_analysis_error_invalid_pdf_and_ollama():
     assert "qwen3:4b" in ollama
 
 
+def test_provider_display_name_is_safe_and_configuration_aware(monkeypatch):
+    from services.model_provider import provider_display_name
+
+    monkeypatch.setenv("CTAI_MODEL_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret-test-key")
+    assert provider_display_name() == "OpenRouter (cloud)"
+    assert "secret-test-key" not in provider_display_name()
+
+    monkeypatch.setenv("CTAI_MODEL_PROVIDER", "invalid")
+    assert provider_display_name() == "Unconfigured model provider"
+
+
+def test_incomplete_and_unknown_analysis_status_fail_closed():
+    import app
+
+    complete, complete_message = app.analysis_completeness_message(
+        {"analysis_complete": True}
+    )
+    incomplete, incomplete_message = app.analysis_completeness_message(
+        {
+            "analysis_complete": False,
+            "incomplete_chunks": [2, 3],
+            "incomplete_reasons": ["OCR was incomplete."],
+        }
+    )
+    unknown, unknown_message = app.analysis_completeness_message({})
+
+    assert complete
+    assert "Analysis complete" in complete_message
+    assert not incomplete
+    assert "2 chunk(s) did not complete" in incomplete_message
+    assert "OCR was incomplete." in incomplete_message
+    assert not unknown
+    assert "could not verify" in unknown_message
+
+
 def test_run_protocol_analysis_delegates_to_pipeline():
     import app
 

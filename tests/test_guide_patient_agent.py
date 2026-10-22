@@ -64,6 +64,19 @@ def _approve_age_only(guide):
     return guide
 
 
+def test_incomplete_guide_blocks_patient_answers_even_if_item_preapproved():
+    guide = _guide()
+    guide.analysis_complete = False
+    item = guide.who_can_join.items[0]
+    item.approved = True
+
+    answer = answer_patient_from_guide("What are the inclusion criteria?", guide)
+
+    assert answer.intent == "not_yet_approved"
+    assert "incomplete" in answer.answer_text
+    assert AGE not in answer.answer_text
+
+
 # ---------------------------------------------------------------------------
 # The reported issue
 # ---------------------------------------------------------------------------
@@ -410,7 +423,7 @@ def test_age_question_with_mixed_approval_still_hides_non_age_ranges():
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 
 
-def test_app_patient_assistant_hides_unapproved_items():
+def test_app_rejects_partially_approved_patient_protocol_snapshot():
     at = AppTest.from_file(APP_PATH, default_timeout=30)
     at.session_state["pipeline_result"] = {
         "analysis": _analysis(),
@@ -419,20 +432,22 @@ def test_app_patient_assistant_hides_unapproved_items():
         "accuracy_warnings": [],
     }
     with patch("agents.plain_language_agent.ollama_rewriter", side_effect=_fake_rewriter):
-        at.session_state["patient_guide"] = _approve_age_only(_guide())
-    at.run()
-
-    at.text_input(key="patient_query_input").input("Who can join this study?")
-    next(b for b in at.button if b.key == "patient_ask_btn").click()
+        partial_guide = _approve_age_only(_guide())
+        at.session_state["patient_guide"] = partial_guide
+        at.session_state["published_protocols"] = {
+            "partial-protocol": {
+                "name": "Partially Approved Protocol",
+                "guide": partial_guide,
+            }
+        }
+    at.session_state["role"] = "patient"
     at.run()
 
     assert not at.exception
-    answer = at.session_state["patient_history"][-1]["answer"]
-    assert "18 and 65" in answer.answer_text
-    assert "Type 2 diabetes" not in answer.answer_text
-    # The coordinator tabs still show the full protocol; only the patient
-    # answer is restricted, so check the rendered answer text itself.
-    assert any("In simple words: " + "Participants must be between 18" in m.value for m in at.markdown)
-    assert not any(
-        "In simple words: " + DIABETES in m.value for m in at.markdown
+    assert not at.selectbox
+    assert not at.chat_input
+    assert at.session_state["patient_history"] == []
+    assert any(
+        "No published clinical trial protocols are available yet." in item.value
+        for item in at.info
     )

@@ -66,6 +66,11 @@ _MEDICAL_ADVICE_PATTERNS = (
     r"\b(okay|ok|safe|fine|alright) (for me )?to (skip|stop|take|change|miss)\b",
     r"\b(skip|stop|quit) (taking )?my\b",
     r"\bwhat dose\b",
+    # Skipping, refusing or changing a study procedure is the patient's
+    # personal medical decision, however the sentence is phrased.
+    r"\b(skip|miss|avoid|refuse|decline|delay|postpone|stop|change|cancel)\b"
+    r".{0,25}\b(blood|test|tests|testing|procedure|procedures|visit|visits|scan|exam|sample)\b",
+    r"\b(do i have to|must i|am i required to|can i opt out of)\b.{0,25}\b(blood|test|procedure|scan|sample)",
 )
 
 _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {

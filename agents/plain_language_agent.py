@@ -33,6 +33,7 @@ from models.plain_language_models import (
     PlainLanguageRewrite,
 )
 from models.protocol_models import ProtocolAnalysis
+from services.model_provider import ModelProviderError, chat_completion
 
 MODEL_NAME = "qwen3:4b"
 MAX_ATTEMPTS = 2
@@ -261,23 +262,15 @@ Your previous answer had these problems. Fix them:
 
 
 def ollama_rewriter(original: str, section: str, feedback: Optional[str] = None) -> str:
-    """Rewrite one statement with the local Ollama model."""
-    import ollama  # imported here so tests do not need a running Ollama server
-
-    kwargs = dict(
+    """Rewrite one protocol statement with the configured model provider."""
+    content = chat_completion(
+        build_prompt(original, section, feedback),
+        PlainLanguageRewrite,
         model=MODEL_NAME,
-        messages=[{"role": "user", "content": build_prompt(original, section, feedback)}],
-        format=PlainLanguageRewrite.model_json_schema(),
         options={"temperature": 0},
+        think=False,
     )
-    try:
-        # qwen3 "thinks" before answering by default, which makes each short
-        # rewrite many times slower on a laptop. A one-sentence rewrite does
-        # not need it; our own checks verify the result instead.
-        response = ollama.chat(think=False, **kwargs)
-    except TypeError:  # older ollama client without the think option
-        response = ollama.chat(**kwargs)
-    data = json.loads(response["message"]["content"])
+    data = json.loads(content)
     return PlainLanguageRewrite.model_validate(data).plain_text
 
 
@@ -301,6 +294,9 @@ def explain_statement(
     for _ in range(MAX_ATTEMPTS):
         try:
             rewritten = rewriter(original, section, feedback)
+        except ModelProviderError as error:
+            problems = [f"The model provider could not produce a rewrite: {error}"]
+            break
         except Exception as error:  # model unavailable or invalid JSON
             problems = [f"The language model could not produce a rewrite ({type(error).__name__})."]
             break
@@ -452,9 +448,18 @@ def generate_patient_guide(
                     seen.add(term.term)
                     glossary.append(term)
 
-    return PatientGuide(
+    # Analyses created before completeness tracking are legacy short-path
+    # fixtures. A newly produced long-path result always sets the field, and
+    # the pipeline converts an absent long-path value to False.
+    analysis_complete = (
+        analysis.analysis_complete
+        if "analysis_complete" in analysis.model_fields_set
+        else True
+    )
+    guide = PatientGuide(
         trial_title=analysis.trial_title,
         protocol_id=analysis.protocol_id,
+        analysis_complete=analysis_complete,
         who_can_join=who_can_join,
         who_cannot_join=who_cannot_join,
         visits=visits,
@@ -463,6 +468,9 @@ def generate_patient_guide(
         glossary=glossary,
         disclaimer=DISCLAIMER,
     )
+    for item in guide.all_items():
+        item.analysis_complete = analysis_complete
+    return guide
 
 
 # ---------------------------------------------------------------------------
@@ -485,19 +493,46 @@ def edit_item(item: GuideItem, new_text: str) -> List[str]:
         item.plain_text = new_text
         item.generated_by = "coordinator"
         item.approved = False
+        item.rejected = False
     item.needs_review = bool(warnings)
     item.review_reasons = warnings
     return warnings
 
 
+REJECTED_REASON = "Marked not accurate by the coordinator."
+
+
 def approve_item(item: GuideItem) -> None:
     """Mark one item as approved by the coordinator."""
+    if item.analysis_complete is not True:
+        raise ValueError(
+            "Cannot approve patient content from an incomplete or "
+            "unverified protocol analysis."
+        )
     item.approved = True
+    if item.rejected:
+        item.rejected = False
+        item.review_reasons = [r for r in item.review_reasons if r != REJECTED_REASON]
+        item.needs_review = bool(item.review_reasons)
 
 
 def unapprove_item(item: GuideItem) -> None:
     """Withdraw approval for one item."""
     item.approved = False
+
+
+def reject_item(item: GuideItem) -> None:
+    """
+    Mark one item as not accurate.
+
+    A rejected item is hidden from patients and flagged for review until the
+    coordinator edits and approves it.
+    """
+    item.approved = False
+    item.rejected = True
+    item.needs_review = True
+    if REJECTED_REASON not in item.review_reasons:
+        item.review_reasons.append(REJECTED_REASON)
 
 
 def approve_all_unflagged(guide: PatientGuide) -> int:
@@ -507,6 +542,17 @@ def approve_all_unflagged(guide: PatientGuide) -> int:
     Flagged items are left for individual human review.
     Returns the number of items newly approved.
     """
+    if guide.analysis_complete is not True:
+        raise ValueError(
+            "Cannot approve patient content from an incomplete or "
+            "unverified protocol analysis."
+        )
+    if any(item.analysis_complete is not True for item in guide.all_items()):
+        raise ValueError(
+            "Cannot approve patient content containing items from an "
+            "incomplete or unverified protocol analysis."
+        )
+
     count = 0
     for item in guide.all_items():
         if not item.needs_review and not item.approved:
@@ -564,6 +610,12 @@ def guide_to_markdown(
     """
     h1 = "#" * heading_level
     h2 = "#" * (heading_level + 1)
+    if approved_only and guide.analysis_complete is not True:
+        return (
+            f"{h1} Patient Guide Unavailable\n\n"
+            "> This guide cannot be published because protocol analysis is "
+            "incomplete or its completeness could not be verified."
+        )
     lines = [f"{h1} {guide.trial_title or 'Clinical Trial'} — Patient Guide"]
     if guide.protocol_id:
         lines.append(f"Protocol ID: {guide.protocol_id}")

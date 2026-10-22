@@ -7,25 +7,44 @@ upload and is cached in session state. Does not modify backend modules.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import streamlit as st
 
+from models.plain_language_models import PatientGuide
 from models.protocol_models import ProtocolAnalysis
-from services.coordinator_query import answer_from_pipeline_result
-from agents.guide_patient_agent import APPROVED_STATUS, answer_patient_from_guide
+from agents.guide_patient_agent import APPROVED_STATUS
+from models.protocol_models import ProtocolAnalysis
+from services import analysis_jobs
+from services.model_provider import provider_display_name
 from services.protocol_pipeline import analyze_protocol_pdf
+from ui import theme
+from ui.landing import (
+    COORDINATOR,
+    NAME_KEY,
+    PATIENT,
+    ROLE_KEY,
+    coordinator_page,
+    navigate_to_page,
+    patient_page,
+    record_page_visit,
+    render_landing,
+    render_top_bar,
+)
+from services.guide_review import build_published_snapshot, decision_block_reason
 from ui.patient_guide_tab import (
     clear_guide,
     get_guide,
+    is_fully_approved_snapshot,
     render_guide_review_tab,
-    render_published_guide,
-    term_definition_answer,
 )
+from ui.patient_view import render_patient_workspace
 
 RESEARCH_DISCLAIMER = (
     "Research prototype for educational demonstration only. This tool does "
@@ -91,6 +110,15 @@ def init_session_state() -> None:
         "uploaded_fingerprint": None,
         "coordinator_history": [],
         "patient_history": [],
+        "coordinator_protocol_id": None,
+        "coordinator_protocols": {},
+        "published_protocols": {},
+        "analysis_job_id": None,
+        "patient_active_protocol_id": None,
+        "patient_summary_open": False,
+        "coord_max_step": 0,
+        ROLE_KEY: None,
+        NAME_KEY: "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -99,11 +127,15 @@ def init_session_state() -> None:
 
 def clear_analysis_state(*, keep_upload: bool = False) -> None:
     """Drop cached analysis and Q&A history; optionally keep the upload path."""
+    analysis_jobs.jobs.discard(st.session_state.get("analysis_job_id"))
+    st.session_state["analysis_job_id"] = None
     cleanup_temp_pdf(st.session_state.get("temp_pdf_path"))
     st.session_state.pipeline_result = None
     st.session_state.analysis_error = None
     st.session_state.coordinator_history = []
     st.session_state.patient_history = []
+    st.session_state.coordinator_protocol_id = None
+    st.session_state.coord_max_step = 0
     clear_guide()
     if not keep_upload:
         st.session_state.temp_pdf_path = None
@@ -140,7 +172,12 @@ def upload_fingerprint(uploaded_file: Any) -> str:
     """Stable-enough key for detecting a new upload in the same session."""
     name = getattr(uploaded_file, "name", "unknown")
     size = getattr(uploaded_file, "size", None)
-    return f"{name}:{size}"
+    fingerprint = f"{name}:{size}"
+    get_buffer = getattr(uploaded_file, "getbuffer", None)
+    if get_buffer is not None:
+        digest = hashlib.sha256(get_buffer()).hexdigest()[:16]
+        fingerprint = f"{fingerprint}:{digest}"
+    return fingerprint
 
 
 def run_protocol_analysis(pdf_path: str) -> dict[str, Any]:
@@ -148,9 +185,103 @@ def run_protocol_analysis(pdf_path: str) -> dict[str, Any]:
     Call the Phase 3 pipeline. Separated for mocking in tests.
 
     Raises ValueError for empty/invalid extractable content and may raise
-    connection/runtime errors if Ollama is unavailable.
+    connection/runtime errors if the configured model provider is unavailable.
     """
     return analyze_protocol_pdf(pdf_path)
+
+
+def active_analysis_job() -> Optional[analysis_jobs.JobSnapshot]:
+    """The queued or running analysis job for this session, if any."""
+    job = analysis_jobs.jobs.get(st.session_state.get("analysis_job_id"))
+    return job if job is not None and job.active else None
+
+
+def start_analysis() -> None:
+    """Start analysis in the background for the current upload (idempotent)."""
+    if st.session_state.get("pipeline_result") is not None or active_analysis_job():
+        return
+    st.session_state["analysis_error"] = None
+    st.session_state["analysis_job_id"] = analysis_jobs.jobs.submit(
+        run_protocol_analysis,
+        st.session_state.temp_pdf_path,
+        st.session_state.coordinator_protocol_id,
+        st.session_state.uploaded_fingerprint,
+    )
+
+
+def collect_analysis_job() -> bool:
+    """
+    Move a finished job's outcome into session state (main thread only).
+
+    Results are attached only when the job still belongs to the current
+    protocol and PDF; anything else is discarded. Returns True when a
+    completed result was just stored.
+    """
+    job_id = st.session_state.get("analysis_job_id")
+    job = analysis_jobs.jobs.get(job_id)
+    if job is None:
+        st.session_state["analysis_job_id"] = None
+        return False
+    if job.active:
+        return False
+
+    st.session_state["analysis_job_id"] = None
+    analysis_jobs.jobs.release(job_id)
+    if (
+        job.status == analysis_jobs.DISCARDED
+        or job.protocol_id != st.session_state.get("coordinator_protocol_id")
+        or job.fingerprint != st.session_state.get("uploaded_fingerprint")
+    ):
+        return False
+    if job.status == analysis_jobs.FAILED:
+        st.session_state["pipeline_result"] = None
+        st.session_state["analysis_error"] = (
+            f"{format_analysis_error(job.error)}\n\n"
+            f"Analysis stopped at {int(job.progress.percent)}% "
+            f"during: {job.progress.stage}. Your uploaded protocol is kept; "
+            "you can try again."
+        )
+        return False
+    st.session_state["pipeline_result"] = job.result
+    st.session_state["analysis_error"] = None
+    return True
+
+
+def _analysis_status_body() -> None:
+    job = active_analysis_job()
+    if job is None:
+        # The coordinator watched it finish, so the app may advance to Summary.
+        st.session_state["_analysis_watched"] = True
+        st.rerun()
+    progress = job.progress
+    if job.status == analysis_jobs.QUEUED:
+        st.progress(0, text="Waiting for another analysis to finish… (indeterminate)")
+    else:
+        percent = int(progress.percent)
+        if progress.determinate and progress.total:
+            detail = f"{progress.stage} ({progress.completed} of {progress.total})"
+        else:
+            detail = f"{progress.stage} (in progress)"
+        st.progress(percent / 100, text=f"{percent}% complete — {detail}")
+    st.info(
+        f"Analyzing with {provider_display_name()}. Analysis keeps running if you "
+        "leave this page. This can take several minutes; results are saved "
+        "automatically when it finishes."
+    )
+
+
+@st.fragment(run_every=2)
+def _poll_analysis_status() -> None:
+    """Refresh the status and rerun the app once the job has finished."""
+    _analysis_status_body()
+
+
+def render_analysis_status() -> bool:
+    """Show running-job status; returns True while analysis is in progress."""
+    if active_analysis_job() is None:
+        return False
+    _poll_analysis_status()
+    return True
 
 
 def format_analysis_error(exc: BaseException) -> str:
@@ -174,14 +305,61 @@ def format_analysis_error(exc: BaseException) -> str:
         "connection error",
     )
     if any(marker in lowered for marker in ollama_markers):
+        if provider_display_name() == "Ollama (local)":
+            return (
+                "Protocol analysis failed because the local Ollama service was "
+                "unreachable or the model could not be called. Confirm Ollama is "
+                "running and that qwen3:4b is available, then try Analyze again. "
+                f"Details: {message}"
+            )
+
+    if "openrouter" in lowered or provider_display_name() == "OpenRouter (cloud)":
         return (
-            "Protocol analysis failed because the local Ollama service was "
-            "unreachable or the model could not be called. Confirm Ollama is "
-            "running and that qwen3:4b is available, then try Analyze again. "
+            "Protocol analysis failed using OpenRouter. Check the provider "
+            "configuration and service availability, then try Analyze again. "
             f"Details: {message}"
         )
 
     return f"Protocol analysis failed: {message}"
+
+
+def analysis_completeness_message(
+    result: Mapping[str, Any],
+) -> tuple[bool, str]:
+    """Describe completeness safely, treating absent or unknown state as partial."""
+    analysis = result.get("analysis")
+    is_complete = result.get(
+        "analysis_complete",
+        getattr(analysis, "analysis_complete", None),
+    )
+    if is_complete is True:
+        return True, "Analysis complete. Results are cached for this upload."
+
+    reasons = list(result.get("incomplete_reasons") or [])
+    failed_chunks = result.get("incomplete_chunks") or []
+    details = []
+    if failed_chunks:
+        details.append(f"{len(failed_chunks)} chunk(s) did not complete.")
+    details.extend(str(reason) for reason in reasons if reason)
+    explanation = " ".join(details) or (
+        "We could not verify completeness: the pipeline did not confirm "
+        "that all required analysis completed."
+    )
+    return (
+        False,
+        "Analysis is incomplete. Treat these results as partial; patient "
+        "publication and approval remain blocked. " + explanation,
+    )
+
+
+def render_analysis_completeness(result: Mapping[str, Any]) -> bool:
+    """Render durable complete/incomplete status and return completeness."""
+    complete, message = analysis_completeness_message(result)
+    if complete:
+        st.success(message)
+    else:
+        st.warning(message)
+    return complete
 
 
 def verification_lookup(
@@ -529,155 +707,449 @@ def render_protocol_summary(pipeline_result: Mapping[str, Any]) -> None:
             st.dataframe(verification, use_container_width=True)
 
 
-def _render_tab_disclaimers(disclaimers: Sequence[str]) -> None:
-    """Show assistant disclaimers once per tab in a compact expander."""
-    items = [item for item in disclaimers if item]
-    with st.expander("Important disclaimers", expanded=False):
-        if not items:
-            st.caption(RESEARCH_DISCLAIMER)
-            return
-        for item in items:
-            st.markdown(f"- {item}")
-        st.caption("Also see the research-prototype notice at the top of the page.")
+STEPS = ["1 · Upload", "2 · Summary", "3 · Review"]
 
 
-def _render_answer_block(
-    answer: Any,
-    *,
-    audience: Optional[str] = None,
-    show_disclaimers: bool = False,
-) -> None:
-    """Render a cleaned answer with citations/metadata in expanders."""
-    intent = getattr(answer, "intent", "unknown")
-    confidence = getattr(answer, "confidence", "unknown")
-    citations = list(getattr(answer, "citations", []) or [])
-    limitations = filter_user_facing_warnings(
-        list(getattr(answer, "limitations", []) or [])
+def current_protocol_name() -> str:
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    record = st.session_state.get("coordinator_protocols", {}).get(protocol_id, {})
+    name = record.get("name", "")
+    return name.strip() if isinstance(name, str) else ""
+
+
+def publish_block_reason(
+    guide: Any,
+    pipeline_result: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """Explain the first unmet publication guardrail."""
+    if pipeline_result is None:
+        if active_analysis_job() is not None:
+            return "Analysis is still running. Publishing is blocked until it completes."
+        return "Run protocol analysis before publishing."
+
+    complete, message = analysis_completeness_message(pipeline_result)
+    if not complete:
+        return message
+    if guide is None:
+        return "Generate patient statements before publishing."
+    if guide.analysis_complete is not True:
+        return "The patient guide is incomplete or unverified; regenerate it from a complete analysis."
+
+    items = guide.all_items()
+    if not items:
+        return "No patient-facing statements are available to publish."
+
+    # Rejected statements are excluded from publication, so only the ones
+    # that would be published must have verified, complete analysis.
+    incomplete = sum(
+        item.analysis_complete is not True for item in items if not item.rejected
     )
-    disclaimers = list(getattr(answer, "disclaimers", []) or [])
-    resolved_audience = audience or getattr(answer, "audience", None)
-
-    meta = f"**Intent:** `{intent}` · **Confidence:** `{confidence}`"
-    if resolved_audience:
-        meta += f" · **Audience:** `{resolved_audience}`"
-    st.markdown(meta)
-
-    display_text = format_display_answer_text(
-        answer,
-        audience=resolved_audience,
-    )
-    st.markdown(display_text)
-
-    if citations:
-        with st.expander("Citations and verification details", expanded=False):
-            for citation in citations:
-                page = (
-                    citation.source_page
-                    if citation.source_page is not None
-                    else "unassigned"
-                )
-                st.markdown(
-                    f"- **Statement:** {citation.statement}  \n"
-                    f"  Category: `{citation.category}` · "
-                    f"Source page: `{page}` · "
-                    f"Verification: `{citation.verification_status}`"
-                )
-                plain = getattr(citation, "plain_language", None)
-                if plain and plain.strip() and plain.strip() != citation.statement:
-                    st.caption(f"Plain-language framing: {plain}")
-
-    if limitations:
-        with st.expander("Limitations", expanded=False):
-            for item in limitations:
-                st.markdown(f"- {item}")
-
-    if show_disclaimers and disclaimers:
-        with st.expander("Disclaimers for this answer", expanded=False):
-            for item in disclaimers:
-                st.markdown(f"- {item}")
-
-
-def render_coordinator_tab(pipeline_result: Mapping[str, Any]) -> None:
-    """Coordinator Q&A over the cached pipeline result."""
-    st.caption(
-        "Ask about inclusion/exclusion criteria, visits, procedures, safety, "
-        "or study metadata. Answers use verified extracted facts only."
-    )
-    _render_tab_disclaimers(
-        [
-            "Coordinator answers are for research-staff review of extracted "
-            "protocol facts only.",
-            "This assistant cannot determine patient eligibility or provide "
-            "medical advice.",
-        ]
-    )
-    query = st.text_input(
-        "Coordinator question",
-        key="coordinator_query_input",
-        placeholder="e.g. What are the inclusion criteria?",
-    )
-    ask = st.button("Ask coordinator assistant", key="coordinator_ask_btn")
-
-    if ask:
-        if not query.strip():
-            st.warning("Enter a question before asking.")
-        else:
-            answer = answer_from_pipeline_result(query.strip(), pipeline_result)
-            st.session_state.coordinator_history.append(
-                {"query": query.strip(), "answer": answer}
-            )
-
-    for item in reversed(st.session_state.coordinator_history):
-        st.markdown(f"#### Q: {item['query']}")
-        _render_answer_block(item["answer"])
-        st.divider()
-
-
-def render_patient_tab(pipeline_result: Mapping[str, Any]) -> None:
-    """Patient Q&A that answers only from the approved Patient Guide."""
-    st.caption(
-        "Answers use only the parts of the patient guide the study team has "
-        "approved. This assistant cannot decide personal eligibility or give "
-        "medical advice."
-    )
-    _render_tab_disclaimers(
-        [
-            "This assistant explains general information from a clinical trial "
-            "protocol summary for educational purposes only. It is not medical "
-            "advice.",
-            "It cannot decide whether you are eligible for a study. Talk with "
-            "the study team or a qualified clinician about your personal "
-            "situation.",
-        ]
-    )
-    render_published_guide()
-    query = st.text_input(
-        "Patient question",
-        key="patient_query_input",
-        placeholder="e.g. Who can join this study?",
-    )
-    ask = st.button("Ask patient assistant", key="patient_ask_btn")
-
-    if ask:
-        if not query.strip():
-            st.warning("Enter a question before asking.")
-        else:
-            answer = term_definition_answer(query.strip())
-            if answer is None:
-                # Patients only ever get coordinator-approved content, never
-                # the raw protocol analysis.
-                answer = answer_patient_from_guide(query.strip(), get_guide())
-            st.session_state.patient_history.append(
-                {"query": query.strip(), "answer": answer}
-            )
-
-    for item in reversed(st.session_state.patient_history):
-        st.markdown(f"#### Q: {item['query']}")
-        _render_answer_block(
-            item["answer"],
-            audience=getattr(item["answer"], "audience", "patient"),
+    if incomplete:
+        return (
+            f"Cannot publish: {incomplete} statement(s) failed completeness "
+            "verification."
         )
-        st.divider()
+
+    reason = decision_block_reason(guide)
+    if reason:
+        return reason
+
+    if not is_fully_approved_snapshot(build_published_snapshot(guide)):
+        return "The patient guide did not pass final approval validation."
+    return None
+
+
+def can_publish_guide(guide: Any, pipeline_result: Optional[Mapping[str, Any]]) -> bool:
+    """Require verified complete analysis and coordinator approval for every item."""
+    return publish_block_reason(guide, pipeline_result) is None
+
+
+PUBLISHED_MESSAGE = "Published successfully! Coordinator task completed."
+
+
+def published_record(protocol_id: Optional[str]) -> Optional[Mapping[str, Any]]:
+    """Return the patient-visible snapshot for a protocol, or None.
+
+    This is the single source of truth for "is it published": the snapshot must
+    exist and pass the same approval validation the patient portal applies.
+    """
+    if not protocol_id:
+        return None
+    record = st.session_state.get("published_protocols", {}).get(protocol_id)
+    if not isinstance(record, Mapping):
+        return None
+    name = record.get("name")
+    if not (isinstance(name, str) and name.strip()):
+        return None
+    return record if is_fully_approved_snapshot(record.get("guide")) else None
+
+
+def _guide_content(guide: Any) -> Optional[dict]:
+    if not isinstance(guide, PatientGuide):
+        return None
+    content = guide.model_dump()
+    content.pop("trial_title", None)
+    content.pop("protocol_id", None)
+    return content
+
+
+def _publishable(guide: Any) -> Any:
+    """What publishing this guide would save (rejected statements removed)."""
+    return build_published_snapshot(guide) if isinstance(guide, PatientGuide) else None
+
+
+def published_matches_current(
+    record: Mapping[str, Any], guide: Any, protocol_name: str
+) -> bool:
+    """True when the live guide and name are exactly what was published."""
+    published = _guide_content(record.get("guide"))
+    return (
+        published is not None
+        and published == _guide_content(_publishable(guide))
+        and record.get("name") == protocol_name
+    )
+
+
+def publish_current_protocol() -> tuple[bool, str]:
+    """Save an approved snapshot for the patient portal after all checks pass."""
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    protocol_name = current_protocol_name()
+    guide = get_guide()
+    if not protocol_id:
+        return False, "The uploaded protocol has no active identifier. Upload it again before publishing."
+    if not protocol_name:
+        return False, "Save a protocol name in Step 1B before publishing."
+    reason = publish_block_reason(
+        guide,
+        st.session_state.get("pipeline_result"),
+    )
+    if reason:
+        return False, reason
+
+    published = dict(st.session_state.get("published_protocols", {}))
+    snapshot = build_published_snapshot(guide)
+    snapshot.trial_title = protocol_name
+    snapshot.protocol_id = None
+    published[protocol_id] = {
+        "name": protocol_name,
+        "guide": snapshot,
+    }
+    st.session_state["published_protocols"] = published
+    return True, PUBLISHED_MESSAGE
+
+
+def _need_analysis() -> bool:
+    """Show a friendly note and return True when no document is analysed yet."""
+    if st.session_state.pipeline_result is not None:
+        return False
+    if render_analysis_status():
+        return True
+    if st.session_state.get("analysis_error"):
+        st.error(st.session_state.analysis_error)
+        return True
+    st.info("Start with step 1: upload a document and click **Analyze**.")
+    return True
+
+
+def _go_to(step: str) -> None:
+    st.session_state["_coord_goto"] = step
+    record_page_visit(
+        coordinator_page(
+            step,
+            max(
+                st.session_state.get("coord_max_step", 0),
+                STEPS.index(step),
+            ),
+        )
+    )
+    st.rerun()
+
+
+def has_coordinator_progress() -> bool:
+    """True when an analysis or guide exists that a new upload would discard."""
+    return (
+        st.session_state.get("pipeline_result") is not None
+        or get_guide() is not None
+        or active_analysis_job() is not None
+    )
+
+
+def adopt_upload(uploaded: Any, fingerprint: str) -> None:
+    """Store a newly uploaded PDF as the current protocol document."""
+    st.session_state.temp_pdf_path = persist_uploaded_pdf(uploaded)
+    st.session_state.uploaded_name = uploaded.name
+    st.session_state.uploaded_fingerprint = fingerprint
+    st.session_state.coordinator_protocol_id = uuid.uuid4().hex
+    st.session_state.coord_max_step = 0
+
+
+def reset_upload_widget() -> None:
+    """Recreate the uploader empty by changing its widget key."""
+    st.session_state["upload_widget_version"] = (
+        st.session_state.get("upload_widget_version", 0) + 1
+    )
+
+
+def render_upload_step() -> None:
+    """Step 1: upload a PDF, name the protocol, and run its analysis."""
+    left, right = st.columns([1.25, 1], gap="large")
+
+    with right:
+        with st.container(key="doctype_card"):
+            st.html('<div class="ctai-label">Step 1b</div><h3 style="margin:0 0 .4rem">Enter protocol name</h3>')
+            protocol_id = st.session_state.get("coordinator_protocol_id")
+            if protocol_id:
+                name_key = f"protocol_name_{protocol_id}"
+                st.text_input(
+                    "Protocol name",
+                    key=name_key,
+                    value=current_protocol_name(),
+                    placeholder="e.g. Type 2 Diabetes Treatment Study",
+                    label_visibility="collapsed",
+                )
+                if st.button("Save", key="save_protocol_name_btn"):
+                    protocol_name = st.session_state[name_key].strip()
+                    if not protocol_name:
+                        st.warning("Enter a protocol name before saving.")
+                    else:
+                        protocols = st.session_state.setdefault("coordinator_protocols", {})
+                        duplicate = any(
+                            existing_id != protocol_id
+                            and record.get("name", "").casefold() == protocol_name.casefold()
+                            for existing_id, record in protocols.items()
+                        )
+                        if duplicate:
+                            st.warning("That name is already saved for another protocol. Choose a different name.")
+                        else:
+                            protocols[protocol_id] = {
+                                "name": protocol_name,
+                                "fingerprint": st.session_state.uploaded_fingerprint,
+                                "uploaded_name": st.session_state.uploaded_name,
+                            }
+                            st.success(f"Protocol name saved: **{protocol_name}**")
+                if current_protocol_name():
+                    st.caption(f"Saved name: **{current_protocol_name()}**")
+            else:
+                st.caption("Upload a PDF to name its protocol.")
+
+    with left:
+        with st.container(key="upload_card"):
+            st.html('<div class="ctai-label">Step 1a</div><h3 style="margin:0 0 .4rem">Upload your document</h3>')
+            upload_key = f"protocol_upload_{st.session_state.get('upload_widget_version', 0)}"
+            uploaded = st.file_uploader(
+                "Document (PDF)",
+                type=["pdf"],
+                key=upload_key,
+                label_visibility="collapsed",
+                help="Select a clinical trial document as a PDF. Analysis may take several minutes.",
+            )
+
+            # The uploader widget is discarded whenever this step is not shown,
+            # so the retained session data, not the widget, defines the document.
+            if uploaded is not None:
+                fingerprint = upload_fingerprint(uploaded)
+                if fingerprint != st.session_state.uploaded_fingerprint:
+                    if not has_coordinator_progress():
+                        adopt_upload(uploaded, fingerprint)
+                        st.rerun()
+                    st.warning(
+                        f"**{uploaded.name}** is different from the current protocol. "
+                        "Replacing it discards the current analysis and approvals "
+                        "(published protocols are not affected)."
+                    )
+                    replace_col, keep_col = st.columns(2)
+                    if replace_col.button("Replace current protocol", key="replace_protocol_btn"):
+                        clear_analysis_state(keep_upload=False)
+                        adopt_upload(uploaded, fingerprint)
+                        st.rerun()
+                    if keep_col.button("Keep current protocol", key="keep_protocol_btn"):
+                        reset_upload_widget()
+                        st.rerun()
+
+            if st.session_state.uploaded_fingerprint:
+                document_missing = (
+                    st.session_state.pipeline_result is None
+                    and active_analysis_job() is None
+                    and not os.path.isfile(st.session_state.temp_pdf_path or "")
+                )
+                if document_missing:
+                    st.warning("The uploaded file is no longer available. Upload the PDF again.")
+                    clear_analysis_state(keep_upload=False)
+                elif active_analysis_job() is not None:
+                    st.success(f"Analyzing: **{st.session_state.uploaded_name}**")
+                elif st.session_state.pipeline_result is None:
+                    st.success(f"Ready to analyze: **{st.session_state.uploaded_name}**")
+                else:
+                    st.success(f"Analysis cached for: **{st.session_state.uploaded_name}**")
+                    st.progress(1.0, text="100% complete — Analysis complete")
+
+                running = render_analysis_status()
+                analyze_clicked = st.button(
+                    "Analyze protocol",
+                    type="primary",
+                    key="analyze_btn",
+                    disabled=st.session_state.pipeline_result is not None or running,
+                )
+                if analyze_clicked:
+                    start_analysis()
+                    st.rerun()
+
+                if st.session_state.pop("_analysis_just_completed", False) and (
+                    st.session_state.pipeline_result is not None
+                ):
+                    _go_to(STEPS[1])
+
+                if st.session_state.analysis_error:
+                    st.error(st.session_state.analysis_error)
+
+                if st.session_state.pipeline_result is not None and st.button(
+                    "Continue to the summary", type="primary", key="continue_summary_btn"
+                ):
+                    _go_to(STEPS[1])
+
+                if st.button("Clear analysis / start over", key="clear_analysis_btn"):
+                    clear_analysis_state(keep_upload=False)
+                    reset_upload_widget()
+                    st.rerun()
+
+            elif st.session_state.pipeline_result is not None:
+                st.caption(
+                    f"Using cached analysis for **{st.session_state.uploaded_name}**. "
+                    "Upload a new PDF to replace it."
+                )
+                if st.button("Continue to the summary", type="primary", key="continue_summary_btn"):
+                    _go_to(STEPS[1])
+
+
+def render_summary_step() -> None:
+    """Step 2: what the AI found in the document."""
+    if _need_analysis():
+        return
+    result = st.session_state.pipeline_result
+    protocol_name = current_protocol_name()
+    st.html(
+        '<div class="ctai-chip-row" style="justify-content:flex-start;margin-bottom:.6rem">'
+        f'{theme.chip(protocol_name or "Protocol name not saved", "lav")}'
+        f'{theme.chip(st.session_state.uploaded_name or "Cached analysis", "grey")}</div>'
+    )
+    st.caption(
+        "This is what the AI found, with the page each item came from. "
+        "Next, it turns these into plain-language statements for you to check."
+    )
+    render_analysis_completeness(result)
+    render_protocol_summary(result)
+    if st.button("Continue to review statements", type="primary", key="continue_review_btn"):
+        _go_to(STEPS[2])
+
+
+def render_review_step() -> None:
+    """Step 3: mark each generated statement accurate or not, then approve."""
+    if _need_analysis():
+        return
+    protocol_name = current_protocol_name()
+    if protocol_name:
+        st.caption(f"Protocol: **{protocol_name}**")
+    render_guide_review_tab(st.session_state.pipeline_result)
+    if get_guide() is None:
+        # Statements are still being generated (or failed): nothing to publish yet.
+        return
+
+    st.divider()
+    st.subheader("Publish to the patient portal")
+
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    guide = get_guide()
+    publish_reason = (
+        "Save a protocol name in Step 1B before publishing."
+        if not protocol_name
+        else publish_block_reason(
+            guide,
+            st.session_state.get("pipeline_result"),
+        )
+    )
+
+    publish_clicked = st.button(
+        "Publish to Patient Portal",
+        type="primary",
+        key="publish_protocol_btn",
+        disabled=publish_reason is not None,
+    )
+    # Only this run's attempt is reported; nothing is carried over between runs.
+    attempt = publish_current_protocol() if publish_clicked else None
+
+    # One status, derived from the actual published snapshot.
+    record = published_record(protocol_id)
+    if attempt is not None and not attempt[0]:
+        st.error(attempt[1])
+    elif record is not None and published_matches_current(record, guide, protocol_name):
+        st.success(PUBLISHED_MESSAGE)
+    elif record is not None:
+        st.info(
+            "An earlier version of this protocol is published. Your latest "
+            "changes are not published yet."
+        )
+        if publish_reason:
+            st.warning(publish_reason)
+    elif publish_reason:
+        st.warning(publish_reason)
+
+    # Last element of the page, and only for a protocol that is really published.
+    if record is not None and st.button(
+        "Preview as a patient", key="preview_patient_btn"
+    ):
+        navigate_to_page(patient_page(protocol_id))
+        st.rerun()
+
+
+def render_coordinator_workspace() -> None:
+    goto = st.session_state.pop("_coord_goto", None)
+    if goto in STEPS:
+        st.session_state["coord_step"] = goto
+        st.session_state["coord_max_step"] = max(
+            st.session_state.get("coord_max_step", 0),
+            STEPS.index(goto),
+        )
+    st.session_state.setdefault("coord_step", STEPS[0])
+    st.session_state.setdefault("coord_max_step", 0)
+
+    current_step = st.session_state["coord_step"]
+    if current_step not in STEPS:
+        current_step = STEPS[0]
+    current_index = STEPS.index(current_step)
+    max_step = min(st.session_state["coord_max_step"], len(STEPS) - 1)
+    if current_index > max_step:
+        current_step = STEPS[max_step]
+        st.session_state["coord_step"] = current_step
+    st.session_state["coord_max_step"] = max(
+        st.session_state["coord_max_step"],
+        current_index,
+    )
+    record_page_visit(
+        coordinator_page(current_step, st.session_state["coord_max_step"])
+    )
+    render_top_bar(COORDINATOR)
+
+    name = st.session_state.get(NAME_KEY) or ""
+    theme.page_head(
+        f"Welcome, {name}" if name else "Coordinator workspace",
+        "Upload a document, check what the AI found, then approve what patients will read.",
+    )
+
+    step = st.segmented_control(
+        "Step",
+        STEPS[: st.session_state["coord_max_step"] + 1],
+        key="coord_step",
+        required=True,
+        label_visibility="collapsed",
+    ) or STEPS[0]
+
+    st.write("")
+    if step == STEPS[0]:
+        render_upload_step()
+    elif step == STEPS[1]:
+        render_summary_step()
+    elif step == STEPS[2]:
+        render_review_step()
 
 
 def main() -> None:
@@ -687,108 +1159,22 @@ def main() -> None:
         layout="wide",
     )
     init_session_state()
+    theme.inject_css()
+    if collect_analysis_job() and st.session_state.get("_analysis_watched"):
+        st.session_state["_analysis_just_completed"] = True
 
-    st.title("Clinical Trial AI")
-    st.markdown(
-        "Upload a clinical trial protocol PDF, extract a verified summary, "
-        "then ask coordinator or patient questions without re-running analysis."
-    )
-    render_disclaimer()
-
-    uploaded = st.file_uploader(
-        "Protocol PDF",
-        type=["pdf"],
-        help="Select a clinical trial protocol PDF. Analysis may take several minutes.",
-    )
-
-    if uploaded is not None:
-        fingerprint = upload_fingerprint(uploaded)
-        if fingerprint != st.session_state.uploaded_fingerprint:
-            clear_analysis_state(keep_upload=False)
-            temp_path = persist_uploaded_pdf(uploaded)
-            st.session_state.temp_pdf_path = temp_path
-            st.session_state.uploaded_name = uploaded.name
-            st.session_state.uploaded_fingerprint = fingerprint
-
-        st.success(f"Ready to analyze: **{st.session_state.uploaded_name}**")
-
-        analyze_clicked = st.button(
-            "Analyze protocol",
-            type="primary",
-            disabled=st.session_state.pipeline_result is not None,
-        )
-
-        if analyze_clicked and st.session_state.pipeline_result is None:
-            st.session_state.analysis_error = None
-            progress = st.progress(0, text="Preparing protocol analysis…")
-            status = st.empty()
-            try:
-                progress.progress(15, text="Saving upload and starting pipeline…")
-                status.info(
-                    "Running PDF extraction, focused protocol analysis, "
-                    "accuracy checks, and source verification. This can take "
-                    "several minutes with the local Ollama model."
-                )
-                progress.progress(40, text="Analyzing protocol (Ollama)…")
-                result = run_protocol_analysis(st.session_state.temp_pdf_path)
-                progress.progress(100, text="Analysis complete.")
-                st.session_state.pipeline_result = result
-                st.session_state.analysis_error = None
-                status.success(
-                    "Analysis complete. Results are cached for this upload — "
-                    "asking questions will not re-run PDF analysis."
-                )
-            except Exception as exc:  # noqa: BLE001 — surface all analyze failures
-                st.session_state.pipeline_result = None
-                st.session_state.analysis_error = format_analysis_error(exc)
-                progress.progress(0, text="Analysis failed.")
-                status.empty()
-
-        if st.session_state.analysis_error:
-            st.error(st.session_state.analysis_error)
-
-        if st.button("Clear analysis / start over"):
-            clear_analysis_state(keep_upload=False)
-            st.rerun()
-
+    role = st.session_state.get(ROLE_KEY)
+    if role == COORDINATOR:
+        render_coordinator_workspace()
+    elif role == PATIENT:
+        render_patient_workspace()
     else:
-        if st.session_state.pipeline_result is not None:
-            st.caption(
-                f"Using cached analysis for **{st.session_state.uploaded_name}**. "
-                "Upload a new PDF to replace it."
-            )
+        render_landing()
 
-    pipeline_result = st.session_state.pipeline_result
-    if pipeline_result is None:
-        st.markdown(
-            "Upload a PDF and click **Analyze protocol** to populate the "
-            "Protocol Summary, Coordinator Assistant, Patient Guide Review, "
-            "and Patient Assistant tabs."
-        )
-        return
-
-    tab_labels = [
-        "Protocol Summary",
-        "Coordinator Assistant",
-        "Patient Guide Review",
-        "Patient Assistant",
-    ]
-    try:
-        # Remember the selected tab, so asking a question or clicking
-        # Approve does not jump back to the first tab.
-        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(
-            tab_labels, key="main_tabs", on_change="rerun"
-        )
-    except TypeError:  # older Streamlit without stateful tabs
-        tab_summary, tab_coord, tab_guide, tab_patient = st.tabs(tab_labels)
-    with tab_summary:
-        render_protocol_summary(pipeline_result)
-    with tab_coord:
-        render_coordinator_tab(pipeline_result)
-    with tab_guide:
-        render_guide_review_tab(pipeline_result)
-    with tab_patient:
-        render_patient_tab(pipeline_result)
+    st.session_state.pop("_analysis_just_completed", None)
+    st.session_state.pop("_analysis_watched", None)
+    if role:
+        st.caption(RESEARCH_DISCLAIMER)
 
 
 if __name__ == "__main__":

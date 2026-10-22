@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pymupdf
 
+from services.analysis_progress import report_stage
+
 
 # Short selectable text with embedded images often means incomplete extraction.
 _SUSPICIOUSLY_SHORT_CHARS = 40
@@ -170,6 +172,8 @@ def extract_pdf(file_path: str) -> dict:
             pages = []
             warnings: list[str] = []
 
+            page_total = len(document)
+            report_stage("extract", 0, page_total)
             for index, page in enumerate(document):
                 page_number = index + 1
                 selectable_text = _extract_selectable_text(page)
@@ -256,6 +260,7 @@ def extract_pdf(file_path: str) -> dict:
                     "ocr_applied": ocr_applied,
                     "garbled_text_detected": garbled,
                 })
+                report_stage("extract", page_number, page_total)
 
             return {
                 "filename": path.name,
