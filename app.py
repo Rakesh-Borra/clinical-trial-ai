@@ -20,6 +20,7 @@ from services.coordinator_query import answer_from_pipeline_result
 from agents.guide_patient_agent import APPROVED_STATUS
 from models.protocol_models import ProtocolAnalysis
 from services.coordinator_query import answer_from_pipeline_result
+from services.model_provider import provider_display_name
 from services.protocol_pipeline import analyze_protocol_pdf
 from ui import theme
 from ui.landing import COORDINATOR, NAME_KEY, PATIENT, ROLE_KEY, render_landing, render_top_bar
@@ -150,7 +151,7 @@ def run_protocol_analysis(pdf_path: str) -> dict[str, Any]:
     Call the Phase 3 pipeline. Separated for mocking in tests.
 
     Raises ValueError for empty/invalid extractable content and may raise
-    connection/runtime errors if Ollama is unavailable.
+    connection/runtime errors if the configured model provider is unavailable.
     """
     return analyze_protocol_pdf(pdf_path)
 
@@ -176,14 +177,61 @@ def format_analysis_error(exc: BaseException) -> str:
         "connection error",
     )
     if any(marker in lowered for marker in ollama_markers):
+        if provider_display_name() == "Ollama (local)":
+            return (
+                "Protocol analysis failed because the local Ollama service was "
+                "unreachable or the model could not be called. Confirm Ollama is "
+                "running and that qwen3:4b is available, then try Analyze again. "
+                f"Details: {message}"
+            )
+
+    if "openrouter" in lowered or provider_display_name() == "OpenRouter (cloud)":
         return (
-            "Protocol analysis failed because the local Ollama service was "
-            "unreachable or the model could not be called. Confirm Ollama is "
-            "running and that qwen3:4b is available, then try Analyze again. "
+            "Protocol analysis failed using OpenRouter. Check the provider "
+            "configuration and service availability, then try Analyze again. "
             f"Details: {message}"
         )
 
     return f"Protocol analysis failed: {message}"
+
+
+def analysis_completeness_message(
+    result: Mapping[str, Any],
+) -> tuple[bool, str]:
+    """Describe completeness safely, treating absent or unknown state as partial."""
+    analysis = result.get("analysis")
+    is_complete = result.get(
+        "analysis_complete",
+        getattr(analysis, "analysis_complete", None),
+    )
+    if is_complete is True:
+        return True, "Analysis complete. Results are cached for this upload."
+
+    reasons = list(result.get("incomplete_reasons") or [])
+    failed_chunks = result.get("incomplete_chunks") or []
+    details = []
+    if failed_chunks:
+        details.append(f"{len(failed_chunks)} chunk(s) did not complete.")
+    details.extend(str(reason) for reason in reasons if reason)
+    explanation = " ".join(details) or (
+        "We could not verify completeness: the pipeline did not confirm "
+        "that all required analysis completed."
+    )
+    return (
+        False,
+        "Analysis is incomplete. Treat these results as partial; patient "
+        "publication and approval remain blocked. " + explanation,
+    )
+
+
+def render_analysis_completeness(result: Mapping[str, Any]) -> bool:
+    """Render durable complete/incomplete status and return completeness."""
+    complete, message = analysis_completeness_message(result)
+    if complete:
+        st.success(message)
+    else:
+        st.warning(message)
+    return complete
 
 
 def verification_lookup(
@@ -718,13 +766,31 @@ def render_upload_step() -> None:
                         status.info(
                             "Running PDF extraction, focused protocol analysis, "
                             "accuracy checks, and source verification. This can take "
-                            "several minutes with the local Ollama model."
+                            f"several minutes with {provider_display_name()}."
                         )
-                        progress.progress(40, text="Analyzing document (Ollama)…")
+                        progress.progress(
+                            40,
+                            text=f"Analyzing document ({provider_display_name()})…",
+                        )
                         result = run_protocol_analysis(st.session_state.temp_pdf_path)
-                        progress.progress(100, text="Analysis complete.")
+                        complete, status_message = analysis_completeness_message(result)
+                        progress.progress(
+                            100,
+                            text=(
+                                "Analysis complete."
+                                if complete
+                                else "Analysis incomplete — review warning."
+                            ),
+                        )
                         st.session_state.pipeline_result = result
                         st.session_state.analysis_error = None
+                        if complete:
+                            status.success(
+                                status_message
+                                + " Asking questions will not re-run PDF analysis."
+                            )
+                        else:
+                            status.warning(status_message)
                     except Exception as exc:  # noqa: BLE001 — surface all analyze failures
                         st.session_state.pipeline_result = None
                         st.session_state.analysis_error = format_analysis_error(exc)
@@ -763,6 +829,7 @@ def render_summary_step() -> None:
         "This is what the AI found, with the page each item came from. "
         "Next, it turns these into plain-language statements for you to check."
     )
+    render_analysis_completeness(result)
     render_protocol_summary(result)
     if st.button("Continue to review statements", type="primary", key="continue_review_btn"):
         _go_to(STEPS[2])

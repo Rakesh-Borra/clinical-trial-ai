@@ -71,6 +71,10 @@ def render_landing() -> None:
     )
 
     st.html('<div class="ctai-section-title"><p>Get started</p><h2>Who is using Clinical Trial AI today?</h2></div>')
+    st.info(
+        "Demo role navigation only — choosing a coordinator or patient role "
+        "does not authenticate users or restrict access."
+    )
 
     left, right = st.columns(2, gap="large")
     with left:

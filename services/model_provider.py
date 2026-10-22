@@ -32,6 +32,16 @@ def _provider_name() -> str:
     return provider
 
 
+def provider_display_name() -> str:
+    """Return a safe UI label for the configured provider, without secrets."""
+    provider = os.getenv("CTAI_MODEL_PROVIDER", "ollama").strip().lower()
+    if provider == "ollama":
+        return "Ollama (local)"
+    if provider == "openrouter":
+        return "OpenRouter (cloud)"
+    return "Unconfigured model provider"
+
+
 def _timeout_seconds() -> float:
     raw_value = os.getenv(
         "CTAI_MODEL_TIMEOUT_SECONDS",

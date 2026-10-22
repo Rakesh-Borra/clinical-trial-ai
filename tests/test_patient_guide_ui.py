@@ -115,6 +115,9 @@ def test_app_opens_on_welcome_page():
     assert not at.exception
     html_text = " ".join(str(h.value) for h in at.get("html"))
     assert "Welcome to" in html_text
+    assert any(
+        "Demo role navigation only" in element.value for element in at.info
+    )
     keys = {b.key for b in at.button}
     assert {"login_coordinator_btn", "login_patient_btn"} <= keys
     # Nothing from the analysis is shown before sign-in.
@@ -202,6 +205,67 @@ def test_patient_can_ask_what_a_word_means():
     history = at.session_state["patient_history"]
     assert history[-1]["answer"].intent == "term_definition"
     assert "kidneys" in history[-1]["answer"].answer_text
+
+
+def test_incomplete_analysis_is_shown_on_coordinator_summary():
+    result = _pipeline_result()
+    result["analysis_complete"] = False
+    result["incomplete_reasons"] = ["Chunk 2 failed extraction."]
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.session_state["pipeline_result"] = result
+    _as(at, "coordinator", "2 · Summary")
+    at.run()
+
+    assert not at.exception
+    assert any("Analysis is incomplete" in warning.value for warning in at.warning)
+    assert any("Chunk 2 failed extraction." in warning.value for warning in at.warning)
+
+
+def test_incomplete_guide_disables_approval_and_blocks_patient_view():
+    result = _pipeline_result()
+    result["analysis_complete"] = False
+    result["analysis"].analysis_complete = False
+    result["incomplete_reasons"] = ["A protocol chunk failed."]
+    with patch(
+        "agents.plain_language_agent.ollama_rewriter",
+        side_effect=_fake_rewriter,
+    ):
+        at = _as(_app_with_analysis(), "coordinator", "3 · Review").run()
+        at.session_state["pipeline_result"] = result
+        at = _click(at, "guide_generate_btn")
+
+    assert not at.exception
+    guide = at.session_state["patient_guide"]
+    assert guide.analysis_complete is False
+    approve_all = next(b for b in at.button if b.key == "guide_approve_all_btn")
+    assert approve_all.disabled
+    first_item_approval = next(
+        b for b in at.button if b.key and b.key.endswith("_approve")
+    )
+    assert first_item_approval.disabled
+
+    # Even pre-approved state cannot publish incomplete content to patients.
+    guide.all_items()[0].approved = True
+    at.session_state["role"] = "patient"
+    at.run()
+    assert not at.exception
+    assert any(
+        "protocol analysis is incomplete" in warning.value
+        for warning in at.warning
+    )
+    patient_text = " ".join(str(h.value) for h in at.get("html"))
+    assert "In simple words: Participants must be between 18 and 65 years old." not in patient_text
+
+
+def test_provider_messaging_uses_safe_configured_label(monkeypatch):
+    monkeypatch.setenv("CTAI_MODEL_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret-test-key")
+    at = _as(_app_with_analysis(), "coordinator", "3 · Review").run()
+
+    assert not at.exception
+    info = " ".join(element.value for element in at.info)
+    assert "OpenRouter (cloud)" in info
+    assert "secret-test-key" not in info
 
 
 def test_clear_analysis_removes_guide():

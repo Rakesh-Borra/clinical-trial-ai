@@ -27,6 +27,7 @@ from agents.plain_language_agent import (
 )
 from models.patient_models import PatientAnswer
 from models.plain_language_models import GuideItem, PatientGuide
+from services.model_provider import provider_display_name
 from ui import theme
 
 GUIDE_KEY = "patient_guide"
@@ -118,7 +119,13 @@ def _status_chip(item: GuideItem) -> str:
     return theme.chip("Waiting for your decision", "grey")
 
 
-def _render_review_item(item: GuideItem, key: str, number: int = 0, total: int = 0) -> None:
+def _render_review_item(
+    item: GuideItem,
+    key: str,
+    number: int = 0,
+    total: int = 0,
+    guide_complete: bool = True,
+) -> None:
     with st.container(border=True):
         page = f"Protocol page {item.source_page}" if item.source_page else "Page not found"
         count = f"Statement {number} of {total} · " if number else ""
@@ -160,10 +167,24 @@ def _render_review_item(item: GuideItem, key: str, number: int = 0, total: int =
                 unapprove_item(item)
                 st.rerun()
         else:
-            if col_yes.button("✅ Yes, approve", key=f"{key}_approve", type="primary"):
+            approval_allowed = (
+                guide_complete and item.analysis_complete is True
+            )
+            if col_yes.button(
+                "✅ Yes, approve",
+                key=f"{key}_approve",
+                type="primary",
+                disabled=not approval_allowed,
+            ):
                 if new_text.strip() != item.plain_text:
                     edit_item(item, new_text)
-                approve_item(item)
+                if guide_complete and item.analysis_complete is True:
+                    approve_item(item)
+                else:
+                    st.warning(
+                        "Approval is disabled because analysis is incomplete "
+                        "or its completeness could not be verified."
+                    )
                 st.rerun()
             if not item.rejected:
                 with col_no.container(key=f"{key}_reject_style"):
@@ -202,10 +223,22 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
                 return
             st.rerun()
         st.info(
-            "Uses the local Ollama model. If Ollama is not running, every item "
-            "keeps the original protocol wording and is flagged for review."
+            f"Uses the configured model provider: {provider_display_name()}. "
+            "If a model request fails, the original wording is kept and "
+            "flagged for review."
         )
         return
+
+    completeness_verified = (
+        guide.analysis_complete is True
+        and all(item.analysis_complete is True for item in guide.all_items())
+    )
+    if not completeness_verified:
+        st.warning(
+            "This guide comes from incomplete or unverified protocol analysis. "
+            "Approval and patient publication are disabled until a complete "
+            "analysis is available. You may still withdraw existing approvals."
+        )
 
     total = len(guide.all_items())
     flagged = len(guide.flagged_items())
@@ -228,8 +261,18 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
         st.info("Nothing is published yet. Approve items to make them visible to patients.")
 
     b1, b2, b3 = st.columns(3)
-    if b1.button("Approve all that passed checks", key="guide_approve_all_btn"):
-        approve_all_unflagged(guide)
+    if b1.button(
+        "Approve all that passed checks",
+        key="guide_approve_all_btn",
+        disabled=not completeness_verified,
+    ):
+        if completeness_verified:
+            approve_all_unflagged(guide)
+        else:
+            st.warning(
+                "Approval is disabled because analysis is incomplete or "
+                "its completeness could not be verified."
+            )
         st.rerun()
     b2.download_button(
         "Download guide (Markdown)",
@@ -259,7 +302,13 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
         for i_index, item in enumerate(section.items):
             number += 1
             if item in items:
-                _render_review_item(item, key=f"guide_{s_index}_{i_index}", number=number, total=total)
+                _render_review_item(
+                    item,
+                    key=f"guide_{s_index}_{i_index}",
+                    number=number,
+                    total=total,
+                    guide_complete=guide.analysis_complete is True,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +319,13 @@ def render_published_guide() -> None:
     """Show the approved parts of the guide to patients."""
     guide = get_guide()
     with st.expander("📖 Patient guide — approved by the study team", expanded=True):
+        if guide is not None and guide.analysis_complete is not True:
+            st.warning(
+                "This protocol analysis is incomplete or could not be verified. "
+                "Patient guide content and Q&A are unavailable until analysis "
+                "is complete."
+            )
+            return
         if guide is None or guide.approved_count() == 0:
             st.caption(
                 "The study team has not published a plain-language guide yet. "

@@ -84,6 +84,12 @@ def _used_terms(guide: PatientGuide) -> List[tuple[str, str]]:
 
 
 def render_guide_panel(guide: Optional[PatientGuide]) -> None:
+    if guide is not None and guide.analysis_complete is not True:
+        st.warning(
+            "This protocol analysis is incomplete or could not be verified. "
+            "The patient guide is unavailable until analysis is complete."
+        )
+        return
     if guide is None or guide.approved_count() == 0:
         _guide_empty_state()
         return
