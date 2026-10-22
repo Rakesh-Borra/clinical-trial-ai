@@ -22,10 +22,12 @@ from agents.plain_language_agent import (
     explain_term_query,
     generate_patient_guide,
     guide_to_markdown,
+    reject_item,
     unapprove_item,
 )
 from models.patient_models import PatientAnswer
 from models.plain_language_models import GuideItem, PatientGuide
+from ui import theme
 
 GUIDE_KEY = "patient_guide"
 
@@ -61,6 +63,8 @@ def item_status(item: GuideItem) -> str:
     """Short status label for the review screen."""
     if item.approved:
         return "✅ Approved"
+    if item.rejected:
+        return "❌ Rejected"
     if item.needs_review:
         return "⚠️ Needs review"
     return "⏳ Waiting for approval"
@@ -95,44 +99,77 @@ def _generate(pipeline_result: Mapping[str, Any]) -> None:
     progress.empty()
 
 
-def _render_review_item(item: GuideItem, key: str) -> None:
+_SECTION_LABEL = {
+    "inclusion_criteria": "Who can join",
+    "exclusion_criteria": "Who cannot join",
+    "visits": "Visits",
+    "procedures": "Procedures",
+    "safety_information": "Safety",
+}
+
+
+def _status_chip(item: GuideItem) -> str:
+    if item.approved:
+        return theme.chip("Approved", "teal")
+    if item.rejected:
+        return theme.chip("Rejected", "coral")
+    if item.needs_review:
+        return theme.chip("Needs review", "sun")
+    return theme.chip("Waiting for your decision", "grey")
+
+
+def _render_review_item(item: GuideItem, key: str, number: int = 0, total: int = 0) -> None:
     with st.container(border=True):
-        top_left, top_right = st.columns([4, 1])
-        page = f" · protocol page {item.source_page}" if item.source_page else ""
-        top_left.caption(f"Original protocol text{page}")
-        top_left.markdown(f"> {item.original_text}")
-        top_right.markdown(f"**{item_status(item)}**")
-        top_right.caption(f"Source: {item.generated_by}")
-
-        for reason in item.review_reasons:
-            st.warning(reason)
-
-        new_text = st.text_area(
-            "Patient-friendly wording",
-            value=item.plain_text,
-            key=f"{key}_text",
-            height=90,
+        page = f"Protocol page {item.source_page}" if item.source_page else "Page not found"
+        count = f"Statement {number} of {total} · " if number else ""
+        st.html(
+            '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">'
+            f'<span class="ctai-label" style="margin:0">{count}{theme.e(_SECTION_LABEL.get(item.section, item.section))} · {theme.e(page)}</span>'
+            f'{_status_chip(item)}</div>'
         )
+        st.html(f'<div class="ctai-label">What the protocol says</div><div class="ctai-quote">{theme.e(item.original_text)}</div>')
+        st.html(f'<div class="ctai-label">What patients would read</div><div class="ctai-plain">{theme.e(item.plain_text)}</div>')
 
-        col_save, col_approve, _ = st.columns([1, 1, 3])
-        if col_save.button("Save edit", key=f"{key}_save"):
-            warnings = edit_item(item, new_text)
-            if warnings:
-                st.session_state[f"{key}_msg"] = ("warning", "Saved, but please check: " + " ".join(warnings))
-            else:
-                st.session_state[f"{key}_msg"] = ("success", "Saved. Approve it to publish.")
-            st.rerun()
+        if item.review_reasons:
+            for reason in item.review_reasons:
+                st.html(f'<div class="ctai-check bad">⚠️ {theme.e(reason)}</div>')
+        else:
+            st.html('<div class="ctai-check ok">✔ Every number kept · ✔ No medical advice or eligibility wording</div>')
+
+        st.html('<div class="ctai-label" style="margin-top:.6rem">Is this statement accurate?</div>')
+        col_yes, col_no, _ = st.columns([1.3, 1.3, 2.4])
+
+        with st.expander("Edit the wording", expanded=False):
+            new_text = st.text_area(
+                "Patient-friendly wording",
+                value=item.plain_text,
+                key=f"{key}_text",
+                height=90,
+                label_visibility="collapsed",
+            )
+            if st.button("Save edit", key=f"{key}_save"):
+                warnings = edit_item(item, new_text)
+                if warnings:
+                    st.session_state[f"{key}_msg"] = ("warning", "Saved, but please check: " + " ".join(warnings))
+                else:
+                    st.session_state[f"{key}_msg"] = ("success", "Saved. Approve it to publish.")
+                st.rerun()
 
         if item.approved:
-            if col_approve.button("Unapprove", key=f"{key}_unapprove"):
+            if col_yes.button("Withdraw approval", key=f"{key}_unapprove"):
                 unapprove_item(item)
                 st.rerun()
         else:
-            if col_approve.button("Approve", key=f"{key}_approve", type="primary"):
+            if col_yes.button("✅ Yes, approve", key=f"{key}_approve", type="primary"):
                 if new_text.strip() != item.plain_text:
                     edit_item(item, new_text)
                 approve_item(item)
                 st.rerun()
+            if not item.rejected:
+                with col_no.container(key=f"{key}_reject_style"):
+                    if st.button("❌ No, reject", key=f"{key}_reject"):
+                        reject_item(item)
+                        st.rerun()
 
         message = st.session_state.pop(f"{key}_msg", None)
         if message:
@@ -151,12 +188,13 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
         "The AI rewrites each protocol statement in plain language, checks "
         "that every number is kept and that nothing sounds like medical "
         "advice or an eligibility decision, retries once if a check fails, "
-        "and flags anything it cannot fix. Patients only see items you approve."
+        "and flags anything it cannot fix. For each statement, tell us if it is "
+        "accurate. Patients only see what you approve."
     )
 
     guide = get_guide()
     if guide is None:
-        if st.button("Generate patient guide", type="primary", key="guide_generate_btn"):
+        if st.button("Generate patient statements", type="primary", key="guide_generate_btn"):
             try:
                 _generate(pipeline_result)
             except Exception as exc:  # noqa: BLE001 — show any failure to the user
@@ -172,11 +210,15 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
     total = len(guide.all_items())
     flagged = len(guide.flagged_items())
     approved = guide.approved_count()
+    rejected = guide.rejected_count()
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Statements", total)
-    m2.metric("Need review", flagged)
-    m3.metric("Approved", f"{approved} / {total}")
+    theme.metrics_row([
+        ("Statements", total, False),
+        ("Approved", f"{approved} / {total}", False),
+        ("Need review", flagged, flagged > 0),
+        ("Rejected", rejected, rejected > 0),
+    ])
+    theme.progress_bar(approved / total if total else 0)
 
     if guide.is_fully_approved():
         st.success("Every item is approved. The full guide is visible to patients.")
@@ -204,17 +246,20 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
     if only_flagged and flagged == 0:
         st.success("No items need review: every rewrite passed the automatic checks.")
 
+    number = 0
     for s_index, section in enumerate(guide.sections()):
         items = [i for i in section.items if i.needs_review or not only_flagged]
         if only_flagged and not items:
+            number += len(section.items)
             continue
         st.subheader(section.title)
         if section.unavailable_message:
             st.caption(section.unavailable_message)
             continue
         for i_index, item in enumerate(section.items):
+            number += 1
             if item in items:
-                _render_review_item(item, key=f"guide_{s_index}_{i_index}")
+                _render_review_item(item, key=f"guide_{s_index}_{i_index}", number=number, total=total)
 
 
 # ---------------------------------------------------------------------------

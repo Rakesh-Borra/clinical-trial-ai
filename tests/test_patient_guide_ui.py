@@ -101,16 +101,46 @@ def test_item_status_labels():
 # End-to-end through the Streamlit app
 # ---------------------------------------------------------------------------
 
-def test_app_shows_four_tabs():
+def _as(at, role, step=None):
+    at.session_state["role"] = role
+    at.session_state["user_name"] = ""
+    if step:
+        at.session_state["coord_step"] = step
+    return at
+
+
+def test_app_opens_on_welcome_page():
     at = _app_with_analysis().run()
 
     assert not at.exception
-    assert [t.label for t in at.tabs] == [
-        "Protocol Summary",
-        "Coordinator Assistant",
-        "Patient Guide Review",
-        "Patient Assistant",
-    ]
+    html_text = " ".join(str(h.value) for h in at.get("html"))
+    assert "Welcome to" in html_text
+    keys = {b.key for b in at.button}
+    assert {"login_coordinator_btn", "login_patient_btn"} <= keys
+    # Nothing from the analysis is shown before sign-in.
+    assert not at.tabs
+
+
+def test_sign_in_opens_each_workspace():
+    at = _app_with_analysis().run()
+    at = _click(at, "login_patient_btn")
+    assert at.session_state["role"] == "patient"
+    assert not at.exception
+
+    at = _click(at, "switch_role_btn")
+    assert at.session_state["role"] is None
+
+    at = _click(at, "login_coordinator_btn")
+    assert at.session_state["role"] == "coordinator"
+    assert not at.exception
+
+
+def test_coordinator_workspace_has_four_steps():
+    at = _as(_app_with_analysis(), "coordinator").run()
+
+    assert not at.exception
+    assert at.session_state["coord_step"] == "1 · Upload"
+    assert at.selectbox(key="doc_type").value == "Clinical trial protocol"
 
 
 def test_generate_review_and_publish_flow():
@@ -118,7 +148,7 @@ def test_generate_review_and_publish_flow():
         "agents.plain_language_agent.ollama_rewriter",
         side_effect=_fake_rewriter,
     ):
-        at = _app_with_analysis().run()
+        at = _as(_app_with_analysis(), "coordinator", "3 · Review").run()
         at = _click(at, "guide_generate_btn")
 
     assert not at.exception
@@ -126,26 +156,47 @@ def test_generate_review_and_publish_flow():
     assert len(guide.all_items()) == 4
     assert len(guide.flagged_items()) == 1  # eGFR item lost its numbers
 
-    # Before approval, patients see nothing from the guide.
-    patient_text = " ".join(m.value for m in at.markdown)
-    assert "In simple words" not in patient_text
-
     # Coordinator approves everything that passed the checks.
     at = _click(at, "guide_approve_all_btn")
     guide = at.session_state["patient_guide"]
     assert guide.approved_count() == 3
     assert not guide.is_fully_approved()
 
-    patient_text = " ".join(m.value for m in at.markdown)
+    # The patient workspace shows approved items only.
+    at.session_state["role"] = "patient"
+    at.run()
+    patient_text = " ".join(str(h.value) for h in at.get("html"))
+    assert not at.exception
     assert "In simple words: Participants must be between 18 and 65 years old." in patient_text
-    # The flagged eGFR item stays hidden from patients.
     assert "weak kidneys" not in patient_text
 
 
+def test_coordinator_can_reject_a_statement():
+    with patch(
+        "agents.plain_language_agent.ollama_rewriter",
+        side_effect=_fake_rewriter,
+    ):
+        at = _as(_app_with_analysis(), "coordinator", "3 · Review").run()
+        at = _click(at, "guide_generate_btn")
+
+    reject_key = next(b.key for b in at.button if b.key and b.key.endswith("_reject"))
+    at = _click(at, reject_key)
+    guide = at.session_state["patient_guide"]
+    assert guide.rejected_count() == 1
+    assert not any(i.approved and i.rejected for i in guide.all_items())
+
+
+def test_patient_empty_state_before_publish():
+    at = _as(_app_with_analysis(), "patient").run()
+
+    assert not at.exception
+    html_text = " ".join(str(h.value) for h in at.get("html"))
+    assert "study guide is on its way" in html_text
+
+
 def test_patient_can_ask_what_a_word_means():
-    at = _app_with_analysis().run()
-    at.text_input(key="patient_query_input").input("What does eGFR mean?")
-    at = _click(at, "patient_ask_btn")
+    at = _as(_app_with_analysis(), "patient").run()
+    at.chat_input(key="patient_chat_input").set_value("What does eGFR mean?").run()
 
     assert not at.exception
     history = at.session_state["patient_history"]
@@ -183,6 +234,7 @@ def test_summary_separates_routine_corrections_from_items_needing_review():
     ]
     at = AppTest.from_file(APP_PATH, default_timeout=30)
     at.session_state["pipeline_result"] = result
+    _as(at, "coordinator", "2 · Summary")
     at.run()
 
     assert not at.exception
@@ -190,14 +242,3 @@ def test_summary_separates_routine_corrections_from_items_needing_review():
     assert "Breakfast provision" in warning_text
     assert "corrected source_page" not in warning_text
     assert any("automatic correction" in e.label for e in at.expander)
-
-
-def test_tabs_remember_selection():
-    at = _app_with_analysis().run()
-    assert not at.exception
-    # Stateful tabs need a key; older Streamlit falls back to plain tabs.
-    import inspect
-    import streamlit as st
-
-    if "key" in inspect.signature(st.tabs).parameters:
-        assert "main_tabs" in at.session_state

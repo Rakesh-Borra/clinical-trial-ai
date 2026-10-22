@@ -52,6 +52,10 @@ class GuideItem(BaseModel):
     # Human approval: patients only ever see approved items.
     approved: bool = False
 
+    # A coordinator can mark a statement as not accurate. Rejected items are
+    # never shown to patients until they are edited and approved.
+    rejected: bool = False
+
 
 class GuideSection(BaseModel):
     """A titled group of guide items."""
@@ -91,6 +95,9 @@ class PatientGuide(BaseModel):
 
     def flagged_items(self) -> List[GuideItem]:
         return [item for item in self.all_items() if item.needs_review]
+
+    def rejected_count(self) -> int:
+        return sum(1 for item in self.all_items() if item.rejected)
 
     def approved_count(self) -> int:
         return sum(1 for item in self.all_items() if item.approved)
