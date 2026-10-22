@@ -1,6 +1,7 @@
 
 import os
 
+from services.analysis_progress import report_stage
 from services.pdf_processor import extract_pdf
 from services.source_verifier import verify_source_pages
 from services.protocol_accuracy import apply_protocol_accuracy_checks
@@ -119,6 +120,7 @@ def analyze_protocol_pdf(file_path: str):
 
     analysis.analysis_complete = analysis_complete
 
+    report_stage("accuracy")
     # Step 5: Deterministic grounding, page repair, and completeness checks
     accuracy_warnings.extend(
         apply_protocol_accuracy_checks(
@@ -128,6 +130,7 @@ def analyze_protocol_pdf(file_path: str):
         )
     )
 
+    report_stage("verify")
     # Step 6: Verify source references (after page repair)
     verification = verify_source_pages(
         analysis,

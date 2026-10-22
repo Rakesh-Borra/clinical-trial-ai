@@ -15,6 +15,7 @@ statement. Eligibility-decision and medical-advice questions are refused.
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import List, Optional, Sequence, Tuple
 
@@ -103,7 +104,9 @@ _NATURAL_INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
     ),
     "procedures": (
         r"\b(procedure|procedures)\b",
-        r"\b(blood (work|draw|glucose|pressure)|lab tests?)\b",
+        r"\b(blood (work|draw|draws|glucose|sugar|pressure|tests?|testing|samples?)"
+        r"|bloodwork|lab tests?|labs?)\b",
+        r"\b(bp|a blood test)\b",
         r"\bwhat (tests|procedures) (are|will|do)\b",
         r"\bstudy (tests?|testing)\b",
     ),
@@ -579,6 +582,136 @@ def _section_answer(guide: PatientGuide, intent: str, query: str) -> PatientAnsw
     )
 
 
+# --- Short / natural question lookup ---------------------------------------
+# Used only when the classifier found no confident section (or the section had
+# no matching approved item). It searches approved, non-rejected statements.
+
+_SYNONYMS = {
+    "bloodwork": ("blood", "test"),
+    "labs": ("lab", "test"),
+    "lab": ("lab", "test"),
+    "sugar": ("glucose",),
+    "bp": ("blood", "pressure"),
+    "testing": ("test",),
+    "tested": ("test",),
+    "tests": ("test",),
+    "exam": ("test",),
+    "checkup": ("visit",),
+}
+# Words too generic to identify a topic on their own.
+_LOOKUP_STOP = frozenset({"will", "get", "give", "taken", "take", "done"})
+_GENERIC_TOPIC = frozenset({"test", "lab"})
+_TIMING_QUESTION = re.compile(
+    r"\b(when|what time|how often|how long|how many times|schedule)\b"
+)
+_TIMING_TEXT = re.compile(
+    r"\b(day|days|week|weeks|month|months|hour|hours|minutes?|daily|weekly|"
+    r"monthly|every|baseline|screening|before|after|timing|at each)\b"
+)
+
+
+def _stem(token: str) -> str:
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _lookup_tokens(text: str) -> set[str]:
+    out: set[str] = set()
+    for raw in re.findall(r"[a-z0-9]+", normalize_text(text)):
+        for tok in _SYNONYMS.get(raw, (raw,)):
+            tok = _stem(tok)
+            if tok in _STOPWORDS or tok in _LOOKUP_STOP:
+                continue
+            if len(tok) > 2 or tok.isdigit():
+                out.add(tok)
+    return out
+
+
+def _lookup_items(guide: PatientGuide) -> List[GuideItem]:
+    return [i for i in guide.all_items() if i.approved and not i.rejected]
+
+
+def _correct_spelling(tokens: set[str], vocabulary: set[str]) -> set[str]:
+    fixed = set()
+    for tok in tokens:
+        if tok in vocabulary or len(tok) < 5:
+            fixed.add(tok)
+            continue
+        close = difflib.get_close_matches(tok, vocabulary, n=1, cutoff=0.84)
+        fixed.add(close[0] if close else tok)
+    return fixed
+
+
+def _lookup_answer(guide: PatientGuide, query: str) -> Optional[PatientAnswer]:
+    """Answer a short or loosely worded question from approved items only."""
+    items = _lookup_items(guide)
+    if not items:
+        return None
+    item_tokens = {id(i): _lookup_tokens(_item_blob(i)) for i in items}
+    vocabulary = set().union(*item_tokens.values())
+    query_tokens = _correct_spelling(_lookup_tokens(query), vocabulary)
+    if not query_tokens:
+        return None
+
+    scored = [(len(query_tokens & item_tokens[id(i)]), i) for i in items]
+    scored = [(n, i) for n, i in scored if n]
+    if not scored:
+        return None
+    best = max(n for n, _ in scored)
+    # Several meaningful words must agree, otherwise only a one-word query may match.
+    if len(query_tokens) > 1 and best < 2:
+        return None
+    matches = [i for n, i in scored if n == best]
+
+    if len(query_tokens) == 1:
+        phrases = sorted(
+            {
+                m.group(0)
+                for i in matches
+                for m in re.finditer(
+                    rf"\b{re.escape(next(iter(query_tokens)))}\w*\s+\w+",
+                    normalize_text(i.plain_text),
+                )
+            }
+        )
+        if len(matches) > 1:
+            options = " or ".join(phrases[:3]) if phrases else "which topic"
+            return _answer(
+                f"Could you tell me a little more? For example, do you mean {options}?"
+                if phrases
+                else "Could you tell me a little more about what you would like to know?",
+                "clarification",
+                limitations=["The question was too short to match one approved topic."],
+            )
+
+    lines = ["Here is what the study team has approved that relates to your question:", ""]
+    lines += [_line(i) for i in matches]
+    return _answer(
+        "\n".join(lines),
+        "procedures" if matches[0].section == "procedures" else "unsupported",
+        citations=[_citation(i) for i in matches],
+        confidence="high",
+    )
+
+
+def _with_timing_note(query: str, answer: PatientAnswer) -> PatientAnswer:
+    """Do not let a topic answer imply timing the approved guide never states."""
+    if (
+        not answer.citations
+        or not _TIMING_QUESTION.search(normalize_text(query))
+        or any(_TIMING_TEXT.search(normalize_text(c.statement)) for c in answer.citations)
+    ):
+        return answer
+    note = (
+        "The approved guide doesn't say exactly when this happens. Please ask "
+        "the clinical trial coordinator for the timing."
+    )
+    return answer.model_copy(update={"answer_text": f"{note}\n\n{answer.answer_text}"})
+
+
 def _eligibility_refusal(guide: PatientGuide) -> PatientAnswer:
     inclusions = _approved(guide.who_can_join)
     exclusions = _approved(guide.who_cannot_join)
@@ -678,7 +811,28 @@ def answer_patient_from_guide(
     if intent == "study_overview":
         return _overview(guide)
     if intent in _SECTION_INTENTS:
-        return _section_answer(guide, intent, query)
+        answer = None
+        # A named test ("blood glucose") is matched precisely; a general
+        # "what tests will I have?" still lists the whole approved section.
+        named_topic = bool(_lookup_tokens(query) - _GENERIC_TOPIC)
+        if intent == "procedures" and named_topic:
+            answer = _lookup_answer(guide, query)
+            if answer is None:
+                return _answer(
+                    "I don't have approved information that answers that "
+                    f"question about the tests and procedures. {_ASK_ABOUT}",
+                    intent,
+                    limitations=["No approved guide item matched the topic asked."],
+                )
+        if answer is None:
+            answer = _section_answer(guide, intent, query)
+        if not answer.citations and intent == "procedures":
+            answer = _lookup_answer(guide, query) or answer
+        return _with_timing_note(query, answer)
+
+    found = _lookup_answer(guide, query)
+    if found is not None:
+        return _with_timing_note(query, found)
 
     return _answer(
         "I'm not sure I understood that question. " + _ASK_ABOUT + " I can't "

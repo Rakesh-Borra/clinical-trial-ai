@@ -12,6 +12,7 @@ from models.protocol_models import (
     TrialProcedure,
     TrialVisit,
 )
+from services.analysis_progress import report_stage
 from services.eligibility_rescue import (
     select_eligibility_sections,
     should_trigger_eligibility_rescue,
@@ -410,9 +411,13 @@ def analyze_protocol_with_rescue(
     if not protocol_text.strip():
         raise ValueError("Protocol text cannot be empty.")
 
+    report_stage("analyze", 0, 2)
     pass_a = _pass_a_metadata_eligibility_safety(protocol_text)
+    report_stage("analyze", 1, 2)
     pass_b = _pass_b_visits_procedures(protocol_text)
+    report_stage("analyze", 2, 2)
     analysis = merge_focused_extractions(pass_a, pass_b)
+    report_stage("rescue")
     return maybe_run_eligibility_rescue(analysis, protocol_text)
 
 
@@ -548,6 +553,8 @@ def analyze_protocol_in_chunks(
     if chunking.warnings:
         incomplete_reasons.extend(chunking.warnings)
 
+    total_passes = len(chunks) * 2
+    report_stage("analyze", 0, total_passes)
     for chunk in chunks:
         chunk_failures: list[str] = []
         pass_a: Optional[MetadataEligibilitySafetyExtraction] = None
@@ -571,6 +578,7 @@ def analyze_protocol_in_chunks(
                     f"Chunk {chunk.index + 1} (source pages "
                     f"{[page.page_number for page in chunk.pages]}): {detail}"
                 )
+            report_stage("analyze", calls_made, total_passes)
 
         if chunk_failures:
             page_numbers = [
@@ -597,6 +605,7 @@ def analyze_protocol_in_chunks(
     analysis, merge_warnings = _merge_chunk_analyses(chunk_analyses)
     warnings.extend(merge_warnings)
     incomplete_reasons.extend(merge_warnings)
+    report_stage("rescue")
 
     continuation_pages = sorted({
         page.page_number

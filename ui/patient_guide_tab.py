@@ -9,6 +9,7 @@ Streamlit screens for the Plain-Language Patient Guide.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Mapping, Optional
 
 import streamlit as st
@@ -27,10 +28,29 @@ from agents.plain_language_agent import (
 )
 from models.patient_models import PatientAnswer
 from models.plain_language_models import GuideItem, PatientGuide
+from services import guide_jobs
+from services.guide_review import (
+    ALL,
+    APPROVED,
+    EDITED,
+    FILTERS,
+    PENDING,
+    REJECTED,
+    edit_problems,
+    matches_filter,
+    patient_visible_guide,
+    reconsider_item,
+    review_state,
+    state_counts,
+)
 from services.model_provider import provider_display_name
 from ui import theme
 
 GUIDE_KEY = "patient_guide"
+GUIDE_SOURCE_KEY = "patient_guide_source"
+GUIDE_JOB_KEY = "guide_job_id"
+GUIDE_ERROR_KEY = "guide_generation_error"
+GUIDE_FILTER_KEY = "guide_filter"
 
 _TERM_DISCLAIMER = (
     "This is a general definition, not medical advice. Ask the study team "
@@ -62,9 +82,12 @@ def term_definition_answer(query: str) -> Optional[PatientAnswer]:
 
 def item_status(item: GuideItem) -> str:
     """Short status label for the review screen."""
-    if item.approved:
+    state = review_state(item)
+    if state == EDITED:
+        return "✏️ Edited and approved"
+    if state == APPROVED:
         return "✅ Approved"
-    if item.rejected:
+    if state == REJECTED:
         return "❌ Rejected"
     if item.needs_review:
         return "⚠️ Needs review"
@@ -75,29 +98,134 @@ def get_guide() -> Optional[PatientGuide]:
     return st.session_state.get(GUIDE_KEY)
 
 
+def is_fully_approved_snapshot(guide: Any) -> bool:
+    """Validate that a patient-facing guide contains only complete approvals."""
+    if not isinstance(guide, PatientGuide) or guide.analysis_complete is not True:
+        return False
+    items = guide.all_items()
+    return bool(items) and all(
+        item.analysis_complete is True and item.approved and not item.rejected
+        for item in items
+    )
+
+
 def clear_guide() -> None:
-    st.session_state.pop(GUIDE_KEY, None)
+    """Forget the guide and any generation in progress or failed."""
+    guide_jobs.jobs.discard(st.session_state.get(GUIDE_JOB_KEY))
+    for key in (GUIDE_KEY, GUIDE_SOURCE_KEY, GUIDE_JOB_KEY, GUIDE_ERROR_KEY):
+        st.session_state.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
 # Coordinator: generate, review, edit, approve
 # ---------------------------------------------------------------------------
 
-def _generate(pipeline_result: Mapping[str, Any]) -> None:
+def analysis_fingerprint(pipeline_result: Mapping[str, Any]) -> str:
+    """Identifies the analysis a guide was written from."""
     analysis = pipeline_result["analysis"]
-    total = max(count_statements(analysis), 1)
-    done = {"n": 0}
-    progress = st.progress(0, text="Writing plain-language explanations…")
+    return hashlib.sha1(analysis.model_dump_json().encode()).hexdigest()[:16]
 
-    def on_item(_item: GuideItem) -> None:
-        done["n"] += 1
-        progress.progress(
-            min(done["n"] / total, 1.0),
-            text=f"Explained {done['n']} of {total} protocol statements…",
+
+def _job_key(fingerprint: str) -> str:
+    return f"{st.session_state.get('coordinator_protocol_id') or ''}:{fingerprint}"
+
+
+def _start_generation(pipeline_result: Mapping[str, Any], fingerprint: str) -> None:
+    """Start (or join) the background job for this protocol's analysis."""
+    analysis = pipeline_result["analysis"]
+
+    def runner(advance):
+        return generate_patient_guide(analysis, on_item=lambda _item: advance())
+
+    st.session_state[GUIDE_ERROR_KEY] = None
+    st.session_state[GUIDE_JOB_KEY] = guide_jobs.jobs.submit(
+        _job_key(fingerprint), runner, max(count_statements(analysis), 1)
+    )
+
+
+def _collect_generation(fingerprint: str) -> None:
+    """Move a finished job's outcome into session state (main thread only)."""
+    job_id = st.session_state.get(GUIDE_JOB_KEY)
+    job = guide_jobs.jobs.get(job_id)
+    if job is None:
+        st.session_state[GUIDE_JOB_KEY] = None
+        return
+    if job.active:
+        return
+    st.session_state[GUIDE_JOB_KEY] = None
+    guide_jobs.jobs.release(job_id)
+    if job.status == guide_jobs.DISCARDED or job.key != _job_key(fingerprint):
+        return
+    if job.status == guide_jobs.FAILED:
+        st.session_state[GUIDE_ERROR_KEY] = str(job.error) or job.error.__class__.__name__
+        return
+    st.session_state[GUIDE_KEY] = job.result
+    st.session_state[GUIDE_SOURCE_KEY] = fingerprint
+    st.session_state[GUIDE_ERROR_KEY] = None
+
+
+@st.fragment(run_every=2)
+def _poll_generation() -> None:
+    """Refresh progress; rerun the app once the job has finished."""
+    job = guide_jobs.jobs.get(st.session_state.get(GUIDE_JOB_KEY))
+    if job is None or not job.active:
+        st.rerun()
+    if job.status == guide_jobs.QUEUED or job.completed == 0:
+        st.progress(0.0, text="Starting… 0% complete")
+    else:
+        st.progress(
+            job.fraction,
+            text=(
+                f"{int(job.fraction * 100)}% complete — explained "
+                f"{job.completed} of {job.total} protocol statements"
+            ),
         )
+    st.info(
+        f"Writing patient-friendly statements with {provider_display_name()} and "
+        "checking each one. This keeps running if you leave this page, and "
+        "the results are kept when you return."
+    )
 
-    st.session_state[GUIDE_KEY] = generate_patient_guide(analysis, on_item=on_item)
-    progress.empty()
+
+def _ensure_guide(pipeline_result: Mapping[str, Any]) -> Optional[PatientGuide]:
+    """
+    The guide for this analysis, generating it automatically when missing.
+
+    Returns None while generation is running or after it failed (the status or
+    a Retry button is drawn here). An existing guide is reused as is.
+    """
+    fingerprint = analysis_fingerprint(pipeline_result)
+    guide = get_guide()
+    source = st.session_state.get(GUIDE_SOURCE_KEY)
+    if guide is not None and source is not None and source != fingerprint:
+        clear_guide()
+        guide = None
+    if guide is not None:
+        return guide
+
+    _collect_generation(fingerprint)
+    guide = get_guide()
+    if guide is not None:
+        return guide
+
+    if guide_jobs.jobs.get(st.session_state.get(GUIDE_JOB_KEY)) is not None:
+        _poll_generation()
+        return None
+
+    error = st.session_state.get(GUIDE_ERROR_KEY)
+    if error:
+        st.error(
+            f"Could not generate the patient statements: {error}\n\n"
+            "Your uploaded protocol and analysis are kept."
+        )
+        if st.button("Retry generation", type="primary", key="guide_retry_btn"):
+            _start_generation(pipeline_result, fingerprint)
+            st.rerun()
+        return None
+
+    _start_generation(pipeline_result, fingerprint)
+    st.rerun()
+    return None
 
 
 _SECTION_LABEL = {
@@ -110,13 +238,16 @@ _SECTION_LABEL = {
 
 
 def _status_chip(item: GuideItem) -> str:
-    if item.approved:
+    state = review_state(item)
+    if state == EDITED:
+        return theme.chip("Edited · approved", "teal")
+    if state == APPROVED:
         return theme.chip("Approved", "teal")
-    if item.rejected:
+    if state == REJECTED:
         return theme.chip("Rejected", "coral")
     if item.needs_review:
         return theme.chip("Needs review", "sun")
-    return theme.chip("Waiting for your decision", "grey")
+    return theme.chip("Pending · waiting for your decision", "grey")
 
 
 def _render_review_item(
@@ -144,7 +275,8 @@ def _render_review_item(
             st.html('<div class="ctai-check ok">✔ Every number kept · ✔ No medical advice or eligibility wording</div>')
 
         st.html('<div class="ctai-label" style="margin-top:.6rem">Is this statement accurate?</div>')
-        col_yes, col_no, _ = st.columns([1.3, 1.3, 2.4])
+        col_yes, col_no, col_undo, _ = st.columns([1.3, 1.3, 1.3, 1.1])
+        state = review_state(item)
 
         with st.expander("Edit the wording", expanded=False):
             new_text = st.text_area(
@@ -162,13 +294,14 @@ def _render_review_item(
                     st.session_state[f"{key}_msg"] = ("success", "Saved. Approve it to publish.")
                 st.rerun()
 
-        if item.approved:
+        edit_issues = edit_problems(item)
+        if state in (APPROVED, EDITED):
             if col_yes.button("Withdraw approval", key=f"{key}_unapprove"):
                 unapprove_item(item)
                 st.rerun()
         else:
             approval_allowed = (
-                guide_complete and item.analysis_complete is True
+                guide_complete and item.analysis_complete is True and not edit_issues
             )
             if col_yes.button(
                 "✅ Yes, approve",
@@ -176,9 +309,15 @@ def _render_review_item(
                 type="primary",
                 disabled=not approval_allowed,
             ):
+                warnings = []
                 if new_text.strip() != item.plain_text:
-                    edit_item(item, new_text)
-                if guide_complete and item.analysis_complete is True:
+                    warnings = edit_item(item, new_text)
+                if warnings:
+                    st.session_state[f"{key}_msg"] = (
+                        "warning",
+                        "Saved, but not approved. Please fix: " + " ".join(warnings),
+                    )
+                elif guide_complete and item.analysis_complete is True:
                     approve_item(item)
                 else:
                     st.warning(
@@ -186,11 +325,20 @@ def _render_review_item(
                         "or its completeness could not be verified."
                     )
                 st.rerun()
-            if not item.rejected:
-                with col_no.container(key=f"{key}_reject_style"):
-                    if st.button("❌ No, reject", key=f"{key}_reject"):
-                        reject_item(item)
-                        st.rerun()
+        if state == REJECTED:
+            if col_undo.button("↩ Reconsider", key=f"{key}_reconsider"):
+                reconsider_item(item)
+                st.rerun()
+        else:
+            with col_no.container(key=f"{key}_reject_style"):
+                if st.button("❌ No, reject", key=f"{key}_reject"):
+                    reject_item(item)
+                    st.rerun()
+        if edit_issues and state not in (APPROVED, EDITED):
+            st.caption(
+                "This edit has not passed verification, so it cannot be "
+                "approved yet: " + " ".join(edit_issues)
+            )
 
         message = st.session_state.pop(f"{key}_msg", None)
         if message:
@@ -203,30 +351,36 @@ def _render_review_item(
             )
 
 
+def _render_filters(counts: dict[str, int]) -> str:
+    """Filter buttons with live counts; returns the selected filter key."""
+    selected = st.session_state.get(GUIDE_FILTER_KEY, ALL)
+    if selected not in dict(FILTERS):
+        selected = ALL
+    with st.container(key="guide_filters", horizontal=True, gap="small"):
+        for filter_key, label in FILTERS:
+            if st.button(
+                f"{label} ({counts[filter_key]})",
+                key=f"guide_filter_{filter_key}",
+                type="primary" if filter_key == selected else "secondary",
+            ):
+                st.session_state[GUIDE_FILTER_KEY] = filter_key
+                st.rerun()
+    return selected
+
+
 def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
-    """Coordinator screen: generate the guide, review it, approve it."""
+    """Coordinator screen: statements are generated on entry, then reviewed."""
     st.caption(
         "The AI rewrites each protocol statement in plain language, checks "
         "that every number is kept and that nothing sounds like medical "
         "advice or an eligibility decision, retries once if a check fails, "
-        "and flags anything it cannot fix. For each statement, tell us if it is "
-        "accurate. Patients only see what you approve."
+        "and flags anything it cannot fix. Give every statement a decision: "
+        "approve it, edit and approve it, or reject it. Rejected statements "
+        "stay here for audit but are never shown to patients."
     )
 
-    guide = get_guide()
+    guide = _ensure_guide(pipeline_result)
     if guide is None:
-        if st.button("Generate patient statements", type="primary", key="guide_generate_btn"):
-            try:
-                _generate(pipeline_result)
-            except Exception as exc:  # noqa: BLE001 — show any failure to the user
-                st.error(f"Could not generate the guide: {exc}")
-                return
-            st.rerun()
-        st.info(
-            f"Uses the configured model provider: {provider_display_name()}. "
-            "If a model request fails, the original wording is kept and "
-            "flagged for review."
-        )
         return
 
     completeness_verified = (
@@ -240,25 +394,32 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
             "analysis is available. You may still withdraw existing approvals."
         )
 
-    total = len(guide.all_items())
-    flagged = len(guide.flagged_items())
-    approved = guide.approved_count()
-    rejected = guide.rejected_count()
+    counts = state_counts(guide)
+    total = counts[ALL]
+    pending = counts[PENDING]
+    accepted = counts[APPROVED] + counts[EDITED]
+    rejected = counts[REJECTED]
 
     theme.metrics_row([
         ("Statements", total, False),
-        ("Approved", f"{approved} / {total}", False),
-        ("Need review", flagged, flagged > 0),
+        ("Approved", f"{accepted} / {total}", False),
+        ("Pending", pending, pending > 0),
         ("Rejected", rejected, rejected > 0),
     ])
-    theme.progress_bar(approved / total if total else 0)
+    theme.progress_bar((total - pending) / total if total else 0)
 
-    if guide.is_fully_approved():
-        st.success("Every item is approved. The full guide is visible to patients.")
-    elif approved:
-        st.info("Patients can see the approved items. The rest stay hidden until approved.")
+    if pending:
+        st.info(
+            f"{pending} statement(s) still need your decision. Publishing "
+            "waits until every statement is approved, edited and approved, or rejected."
+        )
+    elif accepted:
+        st.success(
+            f"Every statement has a decision: {accepted} to publish, "
+            f"{rejected} rejected. Rejected statements are never shown to patients."
+        )
     else:
-        st.info("Nothing is published yet. Approve items to make them visible to patients.")
+        st.warning("Every statement is rejected. Approve at least one to publish.")
 
     b1, b2, b3 = st.columns(3)
     if b1.button(
@@ -276,7 +437,7 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
         st.rerun()
     b2.download_button(
         "Download guide (Markdown)",
-        data=guide_to_markdown(guide),
+        data=guide_to_markdown(patient_visible_guide(guide)),
         file_name="patient_guide.md",
         mime="text/markdown",
         key="guide_download_btn",
@@ -285,15 +446,17 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
         clear_guide()
         st.rerun()
 
-    only_flagged = st.toggle("Show only items that need review", key="guide_only_flagged")
-    if only_flagged and flagged == 0:
-        st.success("No items need review: every rewrite passed the automatic checks.")
+    selected = _render_filters(counts)
+    if counts[selected] == 0 and selected != ALL:
+        st.caption("No statements match this filter.")
 
     number = 0
     for s_index, section in enumerate(guide.sections()):
-        items = [i for i in section.items if i.needs_review or not only_flagged]
-        if only_flagged and not items:
+        visible = [i for i in section.items if matches_filter(i, selected)]
+        if not visible and section.items:
             number += len(section.items)
+            continue
+        if selected != ALL and not section.items:
             continue
         st.subheader(section.title)
         if section.unavailable_message:
@@ -301,7 +464,7 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
             continue
         for i_index, item in enumerate(section.items):
             number += 1
-            if item in items:
+            if matches_filter(item, selected):
                 _render_review_item(
                     item,
                     key=f"guide_{s_index}_{i_index}",
@@ -316,22 +479,12 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def render_published_guide() -> None:
-    """Show the approved parts of the guide to patients."""
-    guide = get_guide()
+    """Show only the selected protocol's successfully published snapshot."""
+    selected_id = st.session_state.get("patient_protocol_select")
+    record = st.session_state.get("published_protocols", {}).get(selected_id)
+    guide = record.get("guide") if isinstance(record, dict) else None
     with st.expander("📖 Patient guide — approved by the study team", expanded=True):
-        if guide is not None and guide.analysis_complete is not True:
-            st.warning(
-                "This protocol analysis is incomplete or could not be verified. "
-                "Patient guide content and Q&A are unavailable until analysis "
-                "is complete."
-            )
+        if not is_fully_approved_snapshot(guide):
+            st.caption("No published clinical trial protocol is selected.")
             return
-        if guide is None or guide.approved_count() == 0:
-            st.caption(
-                "The study team has not published a plain-language guide yet. "
-                "You can still ask questions below."
-            )
-            return
-        if not guide.is_fully_approved():
-            st.caption("Some parts are still being reviewed by the study team.")
         st.markdown(guide_to_markdown(guide, approved_only=True, heading_level=3))
