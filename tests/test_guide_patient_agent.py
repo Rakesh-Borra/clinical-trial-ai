@@ -64,6 +64,19 @@ def _approve_age_only(guide):
     return guide
 
 
+def test_incomplete_guide_blocks_patient_answers_even_if_item_preapproved():
+    guide = _guide()
+    guide.analysis_complete = False
+    item = guide.who_can_join.items[0]
+    item.approved = True
+
+    answer = answer_patient_from_guide("What are the inclusion criteria?", guide)
+
+    assert answer.intent == "not_yet_approved"
+    assert "incomplete" in answer.answer_text
+    assert AGE not in answer.answer_text
+
+
 # ---------------------------------------------------------------------------
 # The reported issue
 # ---------------------------------------------------------------------------

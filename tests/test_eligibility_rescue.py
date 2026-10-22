@@ -249,10 +249,9 @@ def test_analyze_protocol_with_rescue_three_calls_when_needed():
         }
     }
 
-    with patch(
-        "agents.protocol_analysis_agent.ollama.chat",
-        side_effect=[pass_a, pass_b, rescue],
-    ) as mock_chat:
+    with patch("services.model_provider.ollama.Client") as mock_client:
+        mock_chat = mock_client.return_value.chat
+        mock_chat.side_effect = [pass_a, pass_b, rescue]
         analysis, notes = analyze_protocol_with_rescue(COMPLEX_PROTOCOL)
 
     assert mock_chat.call_count == 3

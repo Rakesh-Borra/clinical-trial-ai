@@ -98,6 +98,29 @@ Cached pipeline result (session state)
 
 The model's context window is set to 16,384 tokens (~60,000 characters of protocol text). On a computer with 8 GB of RAM, lower it with `export CTAI_NUM_CTX=8192` before starting the app.
 
+### Optional OpenRouter model provider
+
+Ollama with `qwen3:4b` remains the default. To opt in to OpenRouter, provide
+these settings through the process environment or an approved secret manager:
+
+```bash
+export CTAI_MODEL_PROVIDER=openrouter
+export CTAI_OPENROUTER_MODEL=deepseek/deepseek-v4.1-flash-1017
+export CTAI_MODEL_TIMEOUT_SECONDS=600
+export CTAI_OPENROUTER_MAX_OUTPUT_TOKENS=8192
+```
+
+Set `OPENROUTER_API_KEY` in the shell environment or approved secret manager
+before launching. The key is read only from that environment variable; do not
+put it in source, tests, prompts, or committed files. The application does not
+automatically load `.env` files. OpenRouter requests require a structured-output-capable
+endpoint, disable provider fallback, and request zero-data-retention/data
+collection restrictions. A compatible endpoint may not be available, in
+which case the request fails rather than switching providers. Review protocol
+ownership and cloud-processing authorization before transmitting any protocol
+text. Selecting OpenRouter does not change the long-protocol input or model
+call caps.
+
 ---
 
 ## 4. Prerequisites

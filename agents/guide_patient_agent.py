@@ -660,6 +660,16 @@ def answer_patient_from_guide(
     if intent == "medical_advice_refused":
         return _medical_advice_refusal()
 
+    if guide is not None and guide.analysis_complete is not True:
+        return _answer(
+            "The study team cannot share this guide yet because protocol "
+            "analysis is incomplete or its completeness could not be verified.",
+            "not_yet_approved",
+            limitations=[
+                "Patient publication is blocked until protocol analysis is complete."
+            ],
+        )
+
     if guide is None or guide.approved_count() == 0:
         return _not_published()
 

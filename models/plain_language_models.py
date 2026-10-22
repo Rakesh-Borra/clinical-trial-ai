@@ -51,6 +51,7 @@ class GuideItem(BaseModel):
 
     # Human approval: patients only ever see approved items.
     approved: bool = False
+    analysis_complete: Optional[bool] = True
 
 
 class GuideSection(BaseModel):
@@ -67,6 +68,7 @@ class PatientGuide(BaseModel):
 
     trial_title: Optional[str] = None
     protocol_id: Optional[str] = None
+    analysis_complete: Optional[bool] = True
 
     who_can_join: GuideSection
     who_cannot_join: GuideSection
@@ -93,8 +95,12 @@ class PatientGuide(BaseModel):
         return [item for item in self.all_items() if item.needs_review]
 
     def approved_count(self) -> int:
+        if self.analysis_complete is not True:
+            return 0
         return sum(1 for item in self.all_items() if item.approved)
 
     def is_fully_approved(self) -> bool:
+        if self.analysis_complete is not True:
+            return False
         items = self.all_items()
         return bool(items) and all(item.approved for item in items)

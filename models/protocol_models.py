@@ -28,6 +28,7 @@ class SafetyInformation(BaseModel):
 class ProtocolAnalysis(BaseModel):
     trial_title: Optional[str] = None
     protocol_id: Optional[str] = None
+    analysis_complete: Optional[bool] = None
 
     inclusion_criteria: List[EligibilityCriterion] = Field(default_factory=list)
     exclusion_criteria: List[EligibilityCriterion] = Field(default_factory=list)

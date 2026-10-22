@@ -45,6 +45,8 @@ def test_protocol_pdf_pipeline():
         result = analyze_protocol_pdf("test_protocol.pdf")
 
         assert result["analysis"].trial_title == "Diabetes Study"
+        assert result["analysis_complete"] is True
+        assert result["analysis"].analysis_complete is True
         assert isinstance(result["verification"], list)
         assert result["extraction_warnings"] == []
         assert result["accuracy_warnings"] == []
@@ -211,4 +213,44 @@ def test_pipeline_preserves_rescue_notes_in_accuracy_warnings():
     assert any(
         "Eligibility rescue triggered" in warning
         for warning in result["accuracy_warnings"]
+    )
+
+
+def test_long_pipeline_fails_closed_when_analysis_completeness_is_unknown():
+    page_text = "PROTOCOL TITLE: Long Study\n" + "Long protocol detail. " * 100
+    sample_pdf_result = {
+        "filename": "long_protocol.pdf",
+        "total_pages": 1,
+        "pages": [{
+            "page_number": 1,
+            "text": page_text,
+            "character_count": len(page_text),
+            "requires_ocr": False,
+        }],
+        "warnings": [],
+    }
+
+    with patch(
+        "services.protocol_pipeline.extract_pdf",
+        return_value=sample_pdf_result,
+    ), patch(
+        "services.protocol_pipeline.LONG_PROTOCOL_THRESHOLD_CHARS",
+        100,
+    ), patch(
+        "services.protocol_pipeline.analyze_protocol_in_chunks",
+        return_value=(
+            ProtocolAnalysis(analysis_complete=None),
+            [],
+            [],
+            [],
+            2,
+        ),
+    ):
+        result = analyze_protocol_pdf("long_protocol.pdf")
+
+    assert result["analysis_complete"] is False
+    assert result["analysis"].analysis_complete is False
+    assert any(
+        "completeness could not be verified" in reason
+        for reason in result["incomplete_reasons"]
     )

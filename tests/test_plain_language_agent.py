@@ -5,6 +5,8 @@ These tests use fake rewriters instead of Ollama, so they run
 quickly and do not need a model server.
 """
 
+import pytest
+
 from agents.plain_language_agent import (
     DISCLAIMER,
     approve_all_unflagged,
@@ -20,6 +22,7 @@ from agents.plain_language_agent import (
     find_unsafe_phrases,
     generate_patient_guide,
     guide_to_markdown,
+    unapprove_item,
 )
 from models.protocol_models import (
     EligibilityCriterion,
@@ -347,6 +350,50 @@ def test_new_guide_starts_unapproved():
 
     assert guide.approved_count() == 0
     assert guide.is_fully_approved() is False
+
+
+def test_completeness_propagates_and_legacy_analyses_remain_complete():
+    legacy_analysis = sample_analysis()
+    assert legacy_analysis.analysis_complete is None
+
+    guide = generate_patient_guide(legacy_analysis, rewriter=echo_rewriter)
+    assert guide.analysis_complete is True
+    assert all(item.analysis_complete is True for item in guide.all_items())
+
+
+def test_incomplete_analysis_blocks_individual_and_bulk_approval():
+    analysis = sample_analysis()
+    analysis.analysis_complete = False
+    guide = generate_patient_guide(analysis, rewriter=echo_rewriter)
+    item = guide.who_can_join.items[0]
+
+    assert guide.analysis_complete is False
+    assert all(candidate.analysis_complete is False for candidate in guide.all_items())
+    with pytest.raises(ValueError, match="incomplete or unverified"):
+        approve_item(item)
+    with pytest.raises(ValueError, match="incomplete or unverified"):
+        approve_all_unflagged(guide)
+
+    item.approved = True
+    unapprove_item(item)
+    assert item.approved is False
+
+
+def test_unknown_analysis_completeness_fails_closed_for_publication():
+    analysis = sample_analysis().model_copy(
+        update={"analysis_complete": None}
+    )
+    guide = generate_patient_guide(analysis, rewriter=echo_rewriter)
+    guide.who_can_join.items[0].approved = True
+
+    assert guide.analysis_complete is None
+    assert guide.who_can_join.items[0].analysis_complete is None
+    assert guide.approved_count() == 0
+    assert guide.is_fully_approved() is False
+    assert "cannot be published" in guide_to_markdown(
+        guide, approved_only=True
+    )
+    assert "18 and 65" not in guide_to_markdown(guide, approved_only=True)
 
 
 def test_patient_view_hides_unapproved_items():
