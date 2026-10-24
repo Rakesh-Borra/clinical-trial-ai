@@ -16,6 +16,7 @@ __pycache__/
 # Local databases
 *.db
 *.sqlite3
+data/ctai.db*
 
 # Clinical trial documents and generated outputs
 data/protocols/*

@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from models.coordinator_models import CoordinatorAnswer, CoordinatorCitation
 from models.patient_models import PatientAnswer, PatientCitation
 from models.protocol_models import (
     EligibilityCriterion,
@@ -232,46 +231,21 @@ def test_analysis_is_cached_once_per_upload():
     with patch("app.analyze_protocol_pdf", side_effect=fake_analyze):
         first = app.run_protocol_analysis("/tmp/protocol.pdf")
         # App caches in session_state; assistants consume the cached dict.
-        second_coord = __import__(
-            "services.coordinator_query", fromlist=["answer_from_pipeline_result"]
-        ).answer_from_pipeline_result("What are the inclusion criteria?", first)
         second_patient = __import__(
             "services.patient_query", fromlist=["answer_patient_from_pipeline_result"]
         ).answer_patient_from_pipeline_result("Who can join this study?", first)
 
     assert call_count["n"] == 1
-    assert "7.0%" in second_coord.answer_text
     assert "7.0%" in second_patient.answer_text
-    assert second_coord.citations
     assert second_patient.audience == "patient"
 
 
-def test_coordinator_and_patient_use_cached_pipeline_result():
-    from services.coordinator_query import answer_from_pipeline_result
+def test_patient_uses_cached_pipeline_result():
     from services.patient_query import answer_patient_from_pipeline_result
 
     pipeline = _sample_pipeline_result()
 
-    with patch(
-        "services.coordinator_query.answer_coordinator_query"
-    ) as coord_mock, patch(
-        "services.patient_query.answer_patient_query"
-    ) as patient_mock:
-        coord_mock.return_value = CoordinatorAnswer(
-            answer_text="Inclusion facts",
-            intent="eligibility_inclusion",
-            citations=[
-                CoordinatorCitation(
-                    category="inclusion_criteria",
-                    statement="HbA1c greater than or equal to 7.0%.",
-                    source_page=1,
-                    verification_status="exact_match",
-                )
-            ],
-            confidence="high",
-            limitations=[],
-            disclaimers=["Coordinator disclaimer"],
-        )
+    with patch("services.patient_query.answer_patient_query") as patient_mock:
         patient_mock.return_value = PatientAnswer(
             answer_text="Patient-friendly inclusion facts",
             intent="eligibility_inclusion",
@@ -290,14 +264,10 @@ def test_coordinator_and_patient_use_cached_pipeline_result():
             audience="patient",
         )
 
-        coord = answer_from_pipeline_result("inclusion?", pipeline)
         patient = answer_patient_from_pipeline_result("Who can join?", pipeline)
 
-    coord_mock.assert_called_once()
     patient_mock.assert_called_once()
-    assert coord.confidence == "high"
     assert patient.audience == "patient"
-    assert coord_mock.call_args.args[1] is pipeline["analysis"]
     assert patient_mock.call_args.args[1] is pipeline["analysis"]
 
 

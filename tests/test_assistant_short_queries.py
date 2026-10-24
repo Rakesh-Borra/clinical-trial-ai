@@ -36,8 +36,10 @@ def _guide(timing=True):
     return guide
 
 
-def _ask_agent(query, guide=None):
-    return with_coordinator_referral(answer_patient_from_guide(query, guide or _guide()))
+def _ask_agent(query, guide=None, history=None):
+    return with_coordinator_referral(
+        answer_patient_from_guide(query, guide or _guide(), history=history)
+    )
 
 
 def _cited(answer):
@@ -78,6 +80,121 @@ def test_general_test_question_lists_the_approved_tests():
     assert _cited(_ask_agent("What blood tests will I have?")) >= {GLUCOSE}
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Will they take blood from me?",
+        "Will they collect blood from me?",
+        "Do they draw a sample of my blood?",
+        "Will I have to give a blood sample?",
+        "Is a blood sample collected?",
+    ],
+)
+def test_blood_test_and_collection_questions_use_approved_facts_only(query):
+    answer = _ask_agent(query)
+    assert GLUCOSE in _cited(answer)
+    assert "does not specify whether a blood sample will be drawn" in answer.answer_text
+    assert "coordinator" in answer.answer_text
+    assert "from a vein" not in answer.answer_text
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["Do we have a blood test?", "What blood tests will I have?"],
+)
+def test_general_blood_test_questions_keep_their_existing_answer(query):
+    answer = _ask_agent(query)
+
+    assert GLUCOSE in _cited(answer)
+    assert "does not specify whether a blood sample will be drawn" not in answer.answer_text
+
+
+def test_explicit_approved_collection_statement_can_be_shared():
+    guide = _guide()
+    collection = "A blood sample will be collected at the screening visit."
+    _add(guide, collection, page=4)
+
+    answer = _ask_agent("Will they take blood from me?", guide)
+
+    assert _cited(answer) == {collection}
+    assert "screening visit" in answer.answer_text
+    assert "does not specify whether" not in answer.answer_text
+
+
+def test_blood_question_without_approved_blood_details_states_uncertainty():
+    guide = _approved_guide(_eight_statement_result())
+
+    answer = _ask_agent("Will they collect blood from me?", guide)
+
+    assert answer.citations == []
+    assert "does not specify whether a blood sample will be drawn" in answer.answer_text
+    assert "coordinator" in answer.answer_text
+
+
+def test_ambiguous_blood_test_question_does_not_claim_blood_is_drawn():
+    answer = _ask_agent("Will they test my blood?")
+
+    assert _cited(answer) == {GLUCOSE}
+    assert "does not specify whether a blood sample will be drawn" in answer.answer_text
+    assert "blood pressure" not in answer.answer_text
+
+
+def test_pending_and_rejected_collection_statements_are_not_shared():
+    guide = _guide()
+    pending = _add(
+        guide,
+        "A blood sample will be collected during each visit.",
+        approved=False,
+    )
+
+    answer = _ask_agent("Will they take blood from me?", guide)
+
+    assert pending.plain_text not in answer.answer_text
+    assert pending.plain_text not in _cited(answer)
+    assert "does not specify whether a blood sample will be drawn" in answer.answer_text
+
+    pending.approved = True
+    pending.rejected = True
+    answer = _ask_agent("Will they take blood from me?", guide)
+    assert pending.plain_text not in answer.answer_text
+    assert pending.plain_text not in _cited(answer)
+
+
+def test_blood_follow_up_uses_last_cited_topic_and_preserves_safety_refusal():
+    guide = _guide()
+    prior_answer = _ask_agent("What blood tests will I have?", guide)
+    history = [{"query": "What blood tests will I have?", "answer": prior_answer}]
+
+    follow_up = _ask_agent("Will they take it?", guide, history=history)
+    assert _cited(follow_up) == {GLUCOSE}
+    assert "does not specify whether a blood sample will be drawn" in follow_up.answer_text
+
+    refusal = _ask_agent("Can I skip it?", guide, history=history)
+    assert refusal.intent == "medical_advice_refused"
+    assert refusal.citations == []
+
+
+def test_patient_chat_passes_prior_cited_turn_to_follow_up():
+    guide = _guide()
+    at = _patient_app({"p1": {"name": "Study", "guide": guide}})
+    at = _ask(at, "What blood tests will I have?")
+    at = _ask(at, "Will they take it?")
+
+    answer = at.session_state["patient_history"][-1]["answer"]
+    assert _cited(answer) == {GLUCOSE}
+    assert "does not specify whether a blood sample will be drawn" in answer.answer_text
+
+
+def test_unrelated_follow_up_does_not_inherit_blood_context():
+    guide = _guide()
+    history = [{"query": "What blood tests will I have?", "answer": _ask_agent("What blood tests will I have?", guide)}]
+
+    answer = _ask_agent("What is the weather?", guide, history=history)
+
+    assert answer.intent == "unsupported"
+    assert not answer.citations
+
+
 def test_timing_is_answered_only_when_the_guide_states_it():
     with_timing = _ask_agent("When is my blood test?")
     assert "each study visit" in with_timing.answer_text
@@ -85,7 +202,12 @@ def test_timing_is_answered_only_when_the_guide_states_it():
     without = _ask_agent("When is my blood glucose test?", _guide(timing=False))
     assert "doesn't say exactly when" in without.answer_text
     assert "coordinator" in without.answer_text
-    assert _ask_agent("When will my blood be taken?", _guide(timing=False)).intent == "clarification"
+    collection_uncertainty = _ask_agent(
+        "When will my blood be taken?",
+        _guide(timing=False),
+    )
+    assert "does not specify whether a blood sample will be drawn" in collection_uncertainty.answer_text
+    assert "coordinator" in collection_uncertainty.answer_text
 
 
 def test_unavailable_information_is_stated_not_invented():

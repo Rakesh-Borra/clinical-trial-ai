@@ -22,6 +22,14 @@ from typing import List, Optional, Sequence, Tuple
 from agents.patient_agent import classify_patient_intent
 from models.patient_models import PatientAnswer, PatientCitation
 from models.plain_language_models import GuideItem, GuideSection, PatientGuide
+from services.chat_grounding import naturalize, validate_grounding
+from services.chat_intents import (
+    correct_query_spelling,
+    normalize_phrasing,
+    out_of_scope_reply,
+    out_of_scope_topic,
+    social_answer,
+)
 from services.source_verifier import normalize_text
 
 APPROVED_STATUS = "coordinator_approved"
@@ -106,6 +114,9 @@ _NATURAL_INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\b(procedure|procedures)\b",
         r"\b(blood (work|draw|draws|glucose|sugar|pressure|tests?|testing|samples?)"
         r"|bloodwork|lab tests?|labs?)\b",
+        r"\b(draw|drawing|drawn|collect|collecting|collected|take|taking|taken)"
+        r"\b.{0,25}\b(blood|sample)\b",
+        r"\b(blood|sample)\b.{0,25}\b(drawn|collected|taken)\b",
         r"\b(bp|a blood test)\b",
         r"\bwhat (tests|procedures) (are|will|do)\b",
         r"\bstudy (tests?|testing)\b",
@@ -315,7 +326,7 @@ def _answer(
 
 
 def _approved(section: GuideSection) -> List[GuideItem]:
-    return [item for item in section.items if item.approved]
+    return [item for item in section.items if item.approved and not item.rejected]
 
 
 def _line(item: GuideItem) -> str:
@@ -465,8 +476,8 @@ def _split_by_relevance(
     # Keep the strongest matches; drop weak incidental overlaps.
     threshold = max(min_score, best - 1)
     strong = [item for score, item in matches if score >= threshold]
-    approved = [item for item in strong if item.approved]
-    unapproved = [item for item in strong if not item.approved]
+    approved = [item for item in strong if item.approved and not item.rejected]
+    unapproved = [item for item in strong if not item.approved or item.rejected]
     return approved, unapproved, True
 
 
@@ -608,6 +619,35 @@ _TIMING_TEXT = re.compile(
     r"\b(day|days|week|weeks|month|months|hour|hours|minutes?|daily|weekly|"
     r"monthly|every|baseline|screening|before|after|timing|at each)\b"
 )
+_BLOOD_COLLECTION_QUESTION = re.compile(
+    r"\b(?:draw|drawing|drawn|collect|collecting|collected|take|taking|taken|"
+    r"obtain|obtaining|give|giving|provide|providing)\b.{0,30}\b(?:blood|sample)\b"
+    r"|\b(?:blood|sample)\b.{0,30}\b(?:drawn|collected|taken|obtained)\b"
+    r"|\b(?:blood draw|blood collection|blood sample)\b"
+    r"|\b(?:test|check|analy[sz]e)\s+(?:my|your|our|their)\s+blood\b",
+    re.IGNORECASE,
+)
+_BLOOD_COLLECTION_FOLLOW_UP = re.compile(
+    r"\b(?:will|would|can|could|do|does)\s+they\s+"
+    r"(?:draw|collect|take|obtain)\s+(?:it|that|one)\b"
+    r"|\b(?:draw|collect|take|obtain)\s+(?:it|that|one)\b",
+    re.IGNORECASE,
+)
+_BLOOD_TEST_STATEMENT = re.compile(
+    r"\bblood\b", re.IGNORECASE
+)
+_BLOOD_GLUCOSE_STATEMENT = re.compile(
+    r"\bblood\s+(?:glucose|sugar)\b|\bblood\s+(?:test|testing)\b",
+    re.IGNORECASE,
+)
+_CONFIRMED_BLOOD_COLLECTION = re.compile(
+    r"\b(?:blood|blood sample|blood samples)\b.{0,40}"
+    r"\b(?:drawn|collected|taken|obtained)\b"
+    r"|\b(?:draw|collect|take|obtain)(?:s|ed|ing)?\b.{0,30}"
+    r"\b(?:blood|blood sample)\b",
+    re.IGNORECASE,
+)
+_FOLLOW_UP_REFERENCE = re.compile(r"\b(?:it|that|they|them|those|these)\b")
 
 
 def _stem(token: str) -> str:
@@ -712,6 +752,76 @@ def _with_timing_note(query: str, answer: PatientAnswer) -> PatientAnswer:
     return answer.model_copy(update={"answer_text": f"{note}\n\n{answer.answer_text}"})
 
 
+def _blood_follow_up_context(
+    query: str,
+    history: Optional[Sequence[dict[str, object]]],
+) -> str:
+    """Use only the last cited, approved blood-related answer to resolve a follow-up."""
+    if not history or len(_lookup_tokens(query)) > 5:
+        return ""
+    if not _FOLLOW_UP_REFERENCE.search(normalize_text(query)):
+        return ""
+
+    previous = history[-1]
+    previous_query = previous.get("query")
+    answer = previous.get("answer")
+    if not isinstance(previous_query, str) or not isinstance(answer, PatientAnswer):
+        return ""
+    if answer.intent != "procedures" or not answer.citations:
+        return ""
+    if not any(
+        re.search(r"\b(?:blood|glucose|sugar)\b", citation.statement, re.IGNORECASE)
+        for citation in answer.citations
+    ):
+        return ""
+    return previous_query
+
+
+def _blood_collection_answer(guide: PatientGuide) -> PatientAnswer:
+    """Answer blood-draw questions without conflating them with glucose testing."""
+    approved = [
+        item
+        for item in _approved(guide.procedures)
+        if _BLOOD_TEST_STATEMENT.search(item.plain_text)
+    ]
+    collection_items = [
+        item for item in approved
+        if _CONFIRMED_BLOOD_COLLECTION.search(item.plain_text)
+    ]
+    if collection_items:
+        return _answer(
+            "Here is what the study team has approved about blood collection:\n\n"
+            + "\n".join(_line(item) for item in collection_items),
+            "procedures",
+            citations=[_citation(item) for item in collection_items],
+            confidence="high",
+        )
+
+    glucose_items = [
+        item for item in approved
+        if _BLOOD_GLUCOSE_STATEMENT.search(item.plain_text)
+    ]
+    lines = []
+    if glucose_items:
+        lines = [
+            "The approved guide says:",
+            "",
+            *[_line(item) for item in glucose_items],
+            "",
+        ]
+    lines.append(
+        "The approved guide does not specify whether a blood sample will be "
+        "drawn. Please ask the clinical trial coordinator to confirm."
+    )
+    return _answer(
+        "\n".join(lines),
+        "procedures",
+        citations=[_citation(item) for item in glucose_items],
+        confidence="partial" if glucose_items else "unavailable",
+        limitations=["The approved guide does not specify whether blood is drawn."],
+    )
+
+
 def _eligibility_refusal(guide: PatientGuide) -> PatientAnswer:
     inclusions = _approved(guide.who_can_join)
     exclusions = _approved(guide.who_cannot_join)
@@ -775,9 +885,109 @@ def _overview(guide: PatientGuide) -> PatientAnswer:
     )
 
 
-def answer_patient_from_guide(
+_VAGUE_FOLLOW_UP = re.compile(
+    r"(?:and |what about |how about |so )?(?:it|that|this|those|them|more|"
+    r"why|how|really|tell me more|more info|more information|explain|"
+    r"explain more|go on|elaborate|what else)"
+)
+
+
+def _previous_cited_answer(
+    history: Optional[Sequence[dict[str, object]]],
+) -> Optional[Tuple[str, PatientAnswer]]:
+    """Return the last (query, answer) only if it was a cited section answer."""
+    if not history:
+        return None
+    previous = history[-1]
+    query = previous.get("query")
+    answer = previous.get("answer")
+    if (
+        isinstance(query, str)
+        and isinstance(answer, PatientAnswer)
+        and answer.intent in _SECTION_INTENTS
+        and answer.citations
+    ):
+        return query, answer
+    return None
+
+
+_FOLLOW_UP_FILLER = frozenset({
+    "long", "last", "lasts", "often", "many", "much", "times", "soon",
+    "happen", "happens", "take", "takes", "long", "more", "else", "work",
+})
+
+
+def _topic_follow_up_context(
+    query: str,
+    history: Optional[Sequence[dict[str, object]]],
+    vocabulary: set[str],
+) -> str:
+    """
+    Carry the previous topic into a short pronoun question ("how long is it?").
+
+    The new question's own content words must be known to the approved guide;
+    otherwise the old topic is NOT carried, so unrelated answers cannot leak
+    in (e.g. "is it tasty?" after a visits answer).
+    """
+    previous = _previous_cited_answer(history)
+    tokens = _lookup_tokens(query)
+    if previous is None or len(tokens) > 3:
+        return ""
+    if not _FOLLOW_UP_REFERENCE.search(normalize_text(query)):
+        return ""
+    unknown = {t for t in tokens if t not in vocabulary and t not in _FOLLOW_UP_FILLER}
+    return "" if unknown else previous[0]
+
+
+_ORDINAL = {
+    "first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
+    "last": -1, "final": -1,
+}
+_ORDINAL_QUERY = re.compile(
+    r"(?:and |what about |how about |tell me about |explain |so )?(?:the )?"
+    r"(first|1st|second|2nd|third|3rd|last|final)(?: one| item| point| visit| test| procedure)?"
+)
+
+
+def _ordinal_follow_up(
+    query: str,
+    history: Optional[Sequence[dict[str, object]]],
+) -> Optional[PatientAnswer]:
+    """Resolve "what about the second one?" against the last cited answer."""
+    match = _ORDINAL_QUERY.fullmatch(normalize_text(query))
+    if not match:
+        return None
+    previous = _previous_cited_answer(history)
+    if previous is None:
+        return _answer(
+            "Which one do you mean? Ask me about a topic first, such as "
+            "the visits or tests, and then I can go through them with you.",
+            "unsupported",
+            limitations=["Ambiguous reference; clarification requested."],
+        )
+    citations = previous[1].citations
+    index = _ORDINAL[match.group(1)]
+    if index >= len(citations):
+        return _answer(
+            f"I only listed {len(citations)} item(s) just now. Which one would "
+            "you like to hear about?",
+            previous[1].intent,
+            limitations=["Reference beyond the listed items."],
+        )
+    chosen = citations[index]
+    page = f" (protocol page {chosen.source_page})" if chosen.source_page else ""
+    return _answer(
+        f"That one is:\n\n- {chosen.statement}{page}",
+        previous[1].intent,
+        citations=[chosen],
+        confidence="high",
+    )
+
+
+def _answer_core(
     query: str,
     guide: Optional[PatientGuide],
+    history: Optional[Sequence[dict[str, object]]] = None,
 ) -> PatientAnswer:
     """Answer a patient question using approved Patient Guide items only."""
     if not query or not query.strip():
@@ -787,7 +997,53 @@ def answer_patient_from_guide(
             limitations=["Empty query."],
         )
 
-    intent = _classify_intent(query)
+    # Small talk never touches the guide or produces protocol facts.
+    social = social_answer(query)
+    if social is not None:
+        return social
+
+    vocabulary = set()
+    if guide is not None:
+        for item in _lookup_items(guide):
+            vocabulary |= _lookup_tokens(_item_blob(item))
+    query = normalize_phrasing(correct_query_spelling(query, vocabulary))
+
+    ordinal = _ordinal_follow_up(query, history)
+    if ordinal is not None:
+        return ordinal
+
+    if _VAGUE_FOLLOW_UP.fullmatch(normalize_text(query)):
+        previous = _previous_cited_answer(history)
+        if previous is None:
+            return _answer(
+                "Could you tell me a little more about what you'd like to "
+                "know? For example, you could ask about visits, tests, risks "
+                "or who can join the study.",
+                "unsupported",
+                limitations=["Ambiguous question; clarification requested."],
+            )
+        return _answer(
+            "That's everything the approved guide says on this topic. For "
+            "more detail, please ask your study team. Or ask me about "
+            "another part of the study.",
+            previous[1].intent,
+            limitations=["No further approved information to add."],
+        )
+
+    follow_up_context = _blood_follow_up_context(query, history)
+    if not follow_up_context:
+        follow_up_context = _topic_follow_up_context(query, history, vocabulary)
+    contextual_query = f"{follow_up_context} {query}".strip()
+    intent = _classify_intent(contextual_query)
+    if intent == "procedures" and re.search(
+        r"\bwhat (?:will|would|is going to) happen\b", normalize_text(query)
+    ) and re.search(r"\bvisits?\b", normalize_text(query)):
+        intent = "visits"
+    if follow_up_context and re.search(
+        r"\b(skip|miss|avoid|refuse|decline|delay|postpone|stop|change|cancel)\b",
+        normalize_text(query),
+    ):
+        intent = "medical_advice_refused"
 
     # Refusals never depend on what has been approved.
     if intent == "medical_advice_refused":
@@ -806,6 +1062,26 @@ def answer_patient_from_guide(
     if guide is None or guide.approved_count() == 0:
         return _not_published()
 
+    oos = out_of_scope_topic(query)
+    if oos and _classify_intent(query) == "unsupported":
+        # Answer only if an approved item itself mentions the topic.
+        found = _lookup_answer(guide, oos[1])
+        return found or _answer(
+            out_of_scope_reply(oos[0]),
+            "unsupported",
+            limitations=["Topic is not covered by the approved guide."],
+        )
+
+    blood_collection_question = bool(
+        _BLOOD_COLLECTION_QUESTION.search(query)
+        or (
+            follow_up_context
+            and _BLOOD_COLLECTION_FOLLOW_UP.search(query)
+        )
+    )
+    if blood_collection_question:
+        return _blood_collection_answer(guide)
+
     if intent == "eligibility_decision_refused":
         return _eligibility_refusal(guide)
     if intent == "study_overview":
@@ -816,7 +1092,7 @@ def answer_patient_from_guide(
         # "what tests will I have?" still lists the whole approved section.
         named_topic = bool(_lookup_tokens(query) - _GENERIC_TOPIC)
         if intent == "procedures" and named_topic:
-            answer = _lookup_answer(guide, query)
+            answer = _lookup_answer(guide, contextual_query)
             if answer is None:
                 return _answer(
                     "I don't have approved information that answers that "
@@ -825,12 +1101,12 @@ def answer_patient_from_guide(
                     limitations=["No approved guide item matched the topic asked."],
                 )
         if answer is None:
-            answer = _section_answer(guide, intent, query)
+            answer = _section_answer(guide, intent, contextual_query)
         if not answer.citations and intent == "procedures":
-            answer = _lookup_answer(guide, query) or answer
+            answer = _lookup_answer(guide, contextual_query) or answer
         return _with_timing_note(query, answer)
 
-    found = _lookup_answer(guide, query)
+    found = _lookup_answer(guide, contextual_query)
     if found is not None:
         return _with_timing_note(query, found)
 
@@ -840,3 +1116,40 @@ def answer_patient_from_guide(
         "unsupported",
         limitations=["Query did not match a supported patient question."],
     )
+
+
+def answer_patient_from_guide(
+    query: str,
+    guide: Optional[PatientGuide],
+    history: Optional[Sequence[dict[str, object]]] = None,
+) -> PatientAnswer:
+    """
+    Conversational answer from approved, published guide items only.
+
+    message -> social/typo/phrasing normalization -> context -> intent ->
+    approved evidence (deterministic answer) -> grounding validation ->
+    optional natural wording (CTAI_CHAT_LLM) -> repeat handling.
+    """
+    answer = _answer_core(query, guide, history)
+    answer = validate_grounding(answer, guide)
+    answer = naturalize(query, answer)
+    return _avoid_repeat(answer, history)
+
+
+def _avoid_repeat(
+    answer: PatientAnswer,
+    history: Optional[Sequence[dict[str, object]]],
+) -> PatientAnswer:
+    """Acknowledge an identical repeated answer instead of echoing it blindly."""
+    if not history or not answer.citations:
+        return answer
+    previous = history[-1].get("answer")
+    if isinstance(previous, PatientAnswer) and previous.answer_text == answer.answer_text:
+        return answer.model_copy(update={
+            "answer_text": (
+                "Here is that again, in case it helps:\n\n"
+                + answer.answer_text.split("\n\n", 1)[-1]
+                + "\n\nIf anything is unclear, your study team can explain it."
+            )
+        })
+    return answer

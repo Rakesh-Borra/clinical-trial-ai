@@ -77,7 +77,13 @@ def ask(query: str, guide: PatientGuide) -> None:
         else None
     )
     if answer is None:
-        answer = with_coordinator_referral(answer_patient_from_guide(query, guide))
+        answer = with_coordinator_referral(
+            answer_patient_from_guide(
+                query,
+                guide,
+                history=st.session_state.patient_history,
+            )
+        )
     _record_turn(query, answer, guide)
 
 

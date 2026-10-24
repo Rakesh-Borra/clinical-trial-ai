@@ -12,10 +12,6 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Optional, Sequence
 
-from agents.coordinator_assistant_agent import (
-    build_visit_count_preface,
-    is_visit_count_query,
-)
 from models.patient_models import PatientAnswer, PatientCitation
 from models.protocol_models import ProtocolAnalysis
 from services.source_verifier import normalize_text
@@ -183,6 +179,100 @@ def _status_for(
     return index.get(
         (category, normalize_text(statement)),
         "missing_page",
+    )
+
+
+_VISIT_COUNT_PATTERNS = (
+    r"\bhow many visits\b",
+    r"\bhow many study visits\b",
+    r"\bhow many (scheduled |study )?visits are there\b",
+    r"\bnumber of (scheduled |study )?visits\b",
+    r"\bvisit count\b",
+    r"\bcount of (the )?visits\b",
+)
+
+
+def is_visit_count_query(query: str) -> bool:
+    """True when the user is asking for a visit count, not only the schedule."""
+    return _matches_any(query, _VISIT_COUNT_PATTERNS)
+
+
+def distinct_scheduled_visit_names(analysis: ProtocolAnalysis) -> list[str]:
+    """Return distinct visit names from analysis, preserving first-seen order."""
+    seen: set[str] = set()
+    names: list[str] = []
+    for visit in analysis.visits:
+        key = normalize_text(visit.visit_name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        names.append(visit.visit_name)
+    return names
+
+
+def _distinct_visits_fully_verified(
+    analysis: ProtocolAnalysis,
+    verification: Sequence[dict],
+) -> bool:
+    names = distinct_scheduled_visit_names(analysis)
+    if not names:
+        return False
+    index = _verification_index(verification)
+    return all(
+        _status_for(index, "visits", name) == _VERIFIED_STATUS for name in names
+    )
+
+
+def build_visit_count_preface(
+    analysis: ProtocolAnalysis,
+    verification: Sequence[dict],
+    *,
+    audience: str = "coordinator",
+) -> str:
+    """
+    Build a visit-count lead-in.
+
+    Confirmed numeric counts are only stated when every distinct visit is
+    exact_match verified.
+    """
+    names = distinct_scheduled_visit_names(analysis)
+    count = len(names)
+
+    if count == 0:
+        if audience == "patient":
+            return (
+                "A visit count is not available because no visits were "
+                "present in the extracted study summary. That does not "
+                "necessarily mean the full protocol lacks a schedule."
+            )
+        return (
+            "A confirmed visit count is not available because no visits "
+            "were found in the extracted protocol analysis."
+        )
+
+    if _distinct_visits_fully_verified(analysis, verification):
+        visit_word = "visit" if count == 1 else "visits"
+        if audience == "patient":
+            return (
+                f"The extracted study summary lists {count} distinct "
+                f"scheduled {visit_word}. Here is the visit schedule "
+                "(timing values are shown exactly as extracted):"
+            )
+        return (
+            f"The extracted protocol analysis lists {count} distinct "
+            f"scheduled {visit_word}. Verified visit schedule details:"
+        )
+
+    if audience == "patient":
+        return (
+            "A confirmed visit count is not available because visit "
+            "information in the extracted summary is missing or not fully "
+            "source-verified. Available visit schedule details:"
+        )
+    return (
+        "A confirmed visit count is not available because one or more "
+        "visit entries are missing or not fully source-verified "
+        f"({_VERIFIED_STATUS}). Available visit schedule details:"
     )
 
 

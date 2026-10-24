@@ -1,193 +1,124 @@
 # Clinical Trial AI — System Architecture
 
-> **Built vs planned.** This document describes the full target architecture. The hackathon MVP
-> implements the **Streamlit app, PDF/OCR processing, the Protocol Analysis Agent with eligibility
-> rescue, source verification, the Coordinator and Patient assistants, and the Plain-Language Agent
-> with coordinator approval**. Verification is implemented as `services/source_verifier.py` and
-> `services/protocol_accuracy.py`. The **FastAPI backend, PostgreSQL/SQLite storage, vector store,
-> authentication and the API endpoints in §11 are planned, not built.** See `README.md` for what runs today.
+This document describes what is **implemented in the repository today**. Items that are not built are listed explicitly in [§11](#11-planned-and-not-built). The project is an educational / research prototype: it is not clinically validated, not regulatory-compliant and not production-ready.
 
-## 1. Project Overview
+## 1. Overview
 
-Clinical Trial AI is a multi-agent platform that helps
-research coordinators process clinical trial protocols
-and provides patients with understandable,
-source-grounded trial information.
+Clinical Trial AI helps a **human clinical trial coordinator** turn a protocol PDF into reviewed, source-linked patient information, and lets patients ask questions answered only from content the coordinator approved and published. It is a single Streamlit application (`app.py`) with SQLite persistence and a local LLM (`qwen3:4b` through Ollama). There is no separate backend service.
 
-The system is designed for modular development,
-human oversight, security, and future scalability.
+## 2. The three agents
 
-## 2. System Architecture
+| Agent | Implementation | LLM? |
+|---|---|---|
+| **1. Protocol Analysis Agent** | `agents/protocol_analysis_agent.py` | Yes (Ollama `qwen3:4b`) |
+| **2. Verification Agent** | `services/source_verifier.py`, `services/protocol_accuracy.py`, and the rewrite checks in `agents/plain_language_agent.py` | No (deterministic) |
+| **3. Patient Assistant Agent** | `agents/guide_patient_agent.py`, supported by `agents/patient_agent.py`, `services/chat_intents.py`, `services/chat_grounding.py` | Optional, off by default |
+
+The **coordinator is a human reviewer**, not an AI agent. An earlier deterministic "Coordinator Assistant" module was removed and is not planned.
+
+**Agent 1** extracts study metadata, eligibility criteria, visits, procedures and safety information from section-aware chunks, recording a source page for each item. It may run a conditional eligibility re-extraction (`services/eligibility_rescue.py`).
+
+**Agent 2** checks that extracted statements are present on their cited source pages (`verify_source_pages`), grounds title/protocol ID, repairs page references and checks eligibility completeness (`protocol_accuracy.py`). For generated patient text, `check_rewrite` and `reverify_item` confirm numbers are preserved and that no advice or eligibility-decision wording appears. A status of `exact_match` means the text was found on the page; it does not prove clinical correctness.
+
+**Agent 3** answers patient questions using only approved, published statements (see §7).
+
+**Helper, not an agent:** `agents/plain_language_agent.py` asks the model for a plain-language rewrite of each statement, runs the Agent 2 checks, retries once with feedback, and otherwise keeps the original wording flagged for review. It also provides the edit / reverify / approve / reject operations used by the review UI.
+
+## 3. End-to-end workflow
 
 ```text
-                CLINICAL TRIAL AI
-                        |
-                FRONTEND APPLICATION
-                        |
-          +-------------+-------------+
-          |                           |
-    COORDINATOR PORTAL          PATIENT PORTAL
-          |                           |
-          +-------------+-------------+
-                        |
-                  BACKEND API
-                    FastAPI
-                        |
-                AGENT ORCHESTRATOR
-                        |
-        +---------------+---------------+
-        |               |               |
-   PROTOCOL AGENT   PATIENT AGENT   VERIFICATION AGENT
-        |               |               |
-        +---------------+---------------+
-                        |
-              KNOWLEDGE / DATA LAYER
-                        |
-        +---------------+---------------+
-        |               |               |
-    PostgreSQL      Vector Store     PDF Storage
-        |
-   Trials, Users, Versions,
-   Approvals, Audit Events
+Protocol PDF (upload)
+  → PDF extraction                       services/pdf_processor.py
+  → Section classification + chunking    section_classifier / patient_relevance / section_chunker
+  → Protocol analysis (Agent 1)          agents/protocol_analysis_agent.py   (cached in SQLite)
+  → Source verification (Agent 2)        source_verifier / protocol_accuracy
+  → Plain-language generation + checks   agents/plain_language_agent.py
+  → Human coordinator review             ui/patient_guide_tab.py, services/guide_review.py
+  → Validated publication                app.py → services/review_store.py (SQLite)
+  → Patient Assistant (Agent 3)          ui/patient_view.py → agents/guide_patient_agent.py
 ```
 
-## 3. AI Agents
+Orchestration of the first four stages is in `services/protocol_pipeline.py` (`analyze_protocol_pdf()`), which returns the analysis, verification rows, warnings, relevance summary, performance metrics and completeness audit.
 
-### Protocol Analysis Agent
+## 4. PDF processing and analysis
 
-Responsibilities:
-- Read extracted protocol text.
-- Identify trial objectives and requirements.
-- Extract eligibility criteria.
-- Extract visit schedules and procedures.
-- Identify risks and important instructions.
-- Produce structured outputs with source references.
+- **Extraction** (`pdf_processor.py`): PyMuPDF text per page with page numbers. Pages that are image-only, suspiciously incomplete or garbled by a font problem fall back to local OCR (`pytesseract` + the Tesseract binary), if available. Ruled tables are extracted via PyMuPDF `find_tables` and added to each page dict as `tables`; page `text` is never altered (`CTAI_EXTRACT_TABLES=0` disables).
+- **Section classification** (`section_classifier.py`): heading patterns, including ICH M11-style headings, map to purpose, eligibility, visits, procedures, risks, safety, consent, withdrawal, responsibilities or administrative. Weak content cues are used when headings do not decide it. Protocol amendments are not a separate category.
+- **Patient-relevance filtering** (`patient_relevance.py`): operates on blocks across **all** original pages. Administrative-only blocks are skipped; safety wording inside administrative sections is retained (the heading and the safety paragraphs); tables are kept verbatim; uncertain blocks are kept. The original PDF text remains the basis for verification and citations. No LLM is used for filtering. `CTAI_PATIENT_RELEVANCE_FILTER=0` disables it.
+- **Chunking** (`section_chunker.py`, `protocol_chunker.py`): chunks follow sections and paragraphs under token and character limits, split tables between rows (repeating the header row), and record categories and page ranges.
+- **Analysis** (`protocol_analysis_agent.py`): two extraction passes (metadata/eligibility/safety, and visits/procedures) per chunk, merged and de-duplicated. `route_passes` skips a pass only when the chunk's heading categories and keyword cues agree; otherwise both run. Qwen3 thinking is off by default and output tokens are capped (`CTAI_EXTRACTION_THINK`, `CTAI_EXTRACTION_NUM_PREDICT`).
+- **Limits**: input over `CTAI_PROTOCOL_MAX_INPUT_CHARS` (320,000), more than `CTAI_PROTOCOL_MAX_CALLS` (65) model calls, or more than `CTAI_ANALYSIS_MAX_SECONDS` (1,800) produces an actionable error rather than running indefinitely.
+- **Caching** (`analysis_cache.py`): completed, failure-free analyses are stored in the `analysis_cache` SQLite table. The key hashes the exact text sent to the model plus provider, model, chunking, routing, think/token settings and an analysis version. Verification and accuracy checks always run afresh on the original PDF.
+- **Completeness audit** (`completeness_audit.py`): reports per-category status and lists missing or uncertain patient-relevant categories; the UI shows a caption when attention is needed.
+- **Performance instrumentation** (`performance.py`): stage timings, chunk and model-call counts, and prompt/output token counts when the provider reports them (Ollama does); otherwise they are left unset.
+- **Background jobs** (`analysis_jobs.py`, `guide_jobs.py`, `analysis_progress.py`) run analysis and guide generation off the Streamlit thread with progress reporting.
 
-### Patient Assistant Agent
+## 5. Human coordinator review and publication
 
-Responsibilities:
-- Generate plain-language trial explanations.
-- Answer patient questions using approved Patient Guide items only
-  (`agents/guide_patient_agent.py`); topics not yet approved are reported
-  as "still under review", never read from the raw protocol analysis.
-- Explain trial visits and procedures.
-- Indicate when information is unavailable.
-- Refer medical or eligibility questions to a qualified
-  clinical professional when appropriate.
+- Statements are shown with the original protocol excerpt/page and the generated text (`ui/patient_guide_tab.py`).
+- Review states (`services/guide_review.py`): Pending Review, Approved, Rejected, Needs Reverification, and Published/Withdrawn at protocol level.
+- Editing a statement saves the new text, marks it unverified, and requires **reverification** against the protocol and then explicit approval; the original citation and page are preserved.
+- **Publication validation** (`decision_block_reason`): blocked while statements are pending or awaiting reverification, when everything is rejected, when an edited statement fails verification, or when a mandatory section ("Who may not be able to join", "Safety information") is entirely rejected. Rejected statements are excluded from the published snapshot (`build_published_snapshot`).
+- Publishing writes a snapshot to SQLite; **Unpublish** marks it withdrawn so it is no longer available to patients. Action history is logged.
+- A preview of the patient guide is available before publishing.
 
-### Verification Agent
+## 6. Data storage
 
-Responsibilities:
-- Compare generated statements with source passages.
-- Identify unsupported or contradictory claims.
-- Flag uncertain answers for review.
-- Prevent unapproved information from being published.
-- Record verification results for evaluation.
+SQLite at `data/ctai.db` (override with `CTAI_DB_PATH`; git-ignored). Created automatically by `services/review_store.py` and `services/analysis_cache.py`:
 
-Verification is an additional safeguard, not a
-guarantee of medical accuracy.
+| Table | Purpose |
+|---|---|
+| `drafts` | Latest coordinator working copy per protocol |
+| `publications` | Published/withdrawn guide snapshots (JSON) |
+| `history` | Review and publication action log |
+| `analysis_cache` | Cached model analyses |
 
-## 4. Backend Services
+Uploaded PDFs are written to a temporary file for processing and cleaned up. Streamlit session state holds the working analysis and guide objects; review decisions are persisted to SQLite and restored on restart. Pydantic models are in `models/`.
 
-Planned services:
+## 7. Patient Assistant
 
-- PDF Processing Service
-- Protocol Management Service
-- Agent Orchestration Service
-- Retrieval / RAG Service
-- Authentication Service
-- Approval and Publication Service
-- Audit Logging Service
+Flow in `agents/guide_patient_agent.py` (`answer_patient_from_guide`):
 
-## 5. Data Storage
+1. **Social intents** (greetings, thanks, goodbyes, acknowledgements, with typo tolerance) are answered without retrieval or a model call.
+2. **Spelling and phrasing correction** against the vocabulary of the published guide (`chat_intents.py`).
+3. **Context:** short follow-ups ("what about the second one", "how long is it") reuse the previous cited answer only when the follow-up's own words relate to the guide; ambiguous inputs get a short clarification question.
+4. **Intent and retrieval:** answers are built from approved, non-rejected statements of the currently published guide only; items not approved are reported as under review. Out-of-scope topics (costs, withdrawal, how procedures feel, contacting the team) get an "ask your study team" reply with no citations.
+5. **Safety:** requests for medical advice or a personal eligibility decision are refused (general approved criteria may be shown for discussion with the study team).
+6. **Grounding validation** (`chat_grounding.py`): every citation must be a currently approved statement and every number must appear in approved text or cited page numbers; otherwise a safe reply is returned.
+7. **Optional naturalization** (`CTAI_CHAT_LLM=1`, default off): the model may reword the deterministic answer; the result is discarded in favour of the deterministic text if it is long, adds numbers, includes advice/eligibility phrasing or URLs, or the call fails. Refusals and social replies are never rewritten.
 
-Initial development:
-- SQLite for structured application data.
-- Local file storage for public/synthetic PDFs.
-- Local vector index for retrieval experiments.
+The patient interface (`ui/patient_view.py`) loads the published guide (`patient_visible_guide` removes any rejected item defensively) and calls the assistant. Unpublishing removes it from the assistant's data.
 
-Later development:
-- PostgreSQL for application data.
-- Managed document/object storage.
-- Persistent vector retrieval.
-- Database migrations and backup procedures.
+## 8. Model provider
 
-## 6. Coordinator Workflow
+`services/model_provider.py` exposes `chat_completion` (schema-constrained JSON). Ollama is the supported provider, with model name `qwen3:4b` set in the agent modules. The module also contains an opt-in OpenRouter code path (`CTAI_MODEL_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `CTAI_OPENROUTER_MODEL`) that has **not** been validated end to end; integration is planned work. Provider choice does not change the input/call limits.
 
-1. Coordinator creates a trial.
-2. Coordinator uploads a protocol.
-3. PDF service extracts page-referenced text.
-4. Protocol Agent analyzes the content.
-5. Patient Agent prepares a plain-language guide.
-6. Verification Agent checks source support.
-7. Coordinator reviews and approves the guide.
-8. Approved content becomes available to patients.
+## 9. Configuration
 
-## 7. Patient Workflow
+See the environment-variable table in [`README.md`](README.md#4-workflow). Other variables: `CTAI_MODEL_TIMEOUT_SECONDS`, `CTAI_LONG_PROTOCOL_THRESHOLD_CHARS`, `CTAI_PROTOCOL_RESCUE_MAX_CHARS`, `CTAI_OPENROUTER_MODEL`, `CTAI_OPENROUTER_MAX_OUTPUT_TOKENS`.
 
-1. Patient opens an authorized trial portal.
-2. Patient reads approved trial information.
-3. Patient asks a question.
-4. Retrieval service finds relevant approved content.
-5. Patient Agent generates a grounded explanation.
-6. Verification Agent checks the response.
-7. The application displays the answer with references,
-   or explains that the question needs human review.
+## 10. Safety and privacy
 
-## 8. Protocol Version Management
+- Patients see only coordinator-approved, published content, with protocol page citations.
+- Nothing is published automatically; publication requires validation and an explicit coordinator action.
+- No medical advice, diagnosis, treatment recommendation or personal eligibility decision.
+- Uncertain or unverified statements are flagged for the coordinator; the system errs toward omission rather than invention (see [`EVALUATION.md`](EVALUATION.md)).
+- Sign-in is a demo role selector without authentication. Do not use real patient data.
+- With Ollama, protocol text stays on the local machine.
 
-- Store protocol versions separately.
-- Preserve original source documents.
-- Compare changes between versions.
-- Flag changes affecting patient-facing information.
-- Require reapproval before publishing updated content.
+## 11. Planned and not built
 
-## 9. Safety and Privacy
+- FastAPI backend and API endpoints (previously proposed: `/trials`, `/analyze`, `/approve`, `/chat`)
+- Real authentication and per-user roles
+- Vector store / retrieval over the protocol
+- Protocol version management
+- Validated OpenRouter integration
+- Further performance optimisation measured on full-length protocols and broader evaluation
 
-- Use public or synthetic data during development.
-- Do not upload real patient information to AI services.
-- Never independently diagnose or determine eligibility.
-- Require qualified human review for patient materials.
-- Enforce role-based access in later phases.
-- Maintain audit logs for important actions.
-- Treat AI-generated text as untrusted until validated.
+## 12. Development principles
 
-## 10. Team Ownership
-
-### Rakesh
-AI agents, PDF processing, backend, retrieval,
-database integration, and orchestration.
-
-### Raj
-Protocol research, test datasets, evaluation,
-automated testing, and documentation.
-
-### Nam
-Coordinator dashboard, patient portal,
-chatbot interface, usability, and accessibility.
-
-## 11. Integration Contracts
-
-Frontend and backend should exchange structured data
-through documented interfaces.
-
-Initial planned API endpoints:
-
-POST /trials
-POST /trials/{trial_id}/protocols
-POST /trials/{trial_id}/analyze
-GET  /trials/{trial_id}/summary
-POST /trials/{trial_id}/approve
-POST /trials/{trial_id}/chat
-
-These are proposed endpoints, not yet implemented.
-
-## 12. Development Principles
-
-1. Build modules independently.
-2. Define data contracts before integration.
-3. Preserve protocol source references.
-4. Write tests for important behavior.
-5. Keep secrets and private data out of Git.
-6. Review code before merging into main.
-7. Build a working system incrementally.
+1. Preserve protocol source references.
+2. Keep human review in front of anything patient-facing.
+3. Write tests for important behaviour; mock model calls.
+4. Keep secrets and private data out of Git.
+5. Build incrementally.

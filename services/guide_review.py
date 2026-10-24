@@ -26,11 +26,13 @@ PENDING = "pending"
 APPROVED = "approved"
 EDITED = "edited"
 REJECTED = "rejected"
+NEEDS_REVERIFICATION = "needs_reverification"
 ALL = "all"
 
 FILTERS = (
     (ALL, "All Statements"),
     (PENDING, "Pending"),
+    (NEEDS_REVERIFICATION, "Needs Reverification"),
     (APPROVED, "Approved"),
     (EDITED, "Edited"),
     (REJECTED, "Rejected"),
@@ -61,6 +63,8 @@ def review_state(item: GuideItem) -> str:
         return REJECTED
     if item.approved:
         return EDITED if item.generated_by == "coordinator" else APPROVED
+    if item.verification != "verified":
+        return NEEDS_REVERIFICATION
     return PENDING
 
 
@@ -105,6 +109,13 @@ def decision_block_reason(guide: PatientGuide) -> Optional[str]:
             "decision. Approve, edit and approve, or reject each one."
         )
 
+    unverified = sum(review_state(i) == NEEDS_REVERIFICATION for i in items)
+    if unverified:
+        return (
+            f"Cannot publish: {unverified} edited statement(s) must be "
+            "reverified against the protocol and then approved."
+        )
+
     kept = [i for i in items if not i.rejected]
     if not kept:
         return (
@@ -118,6 +129,11 @@ def decision_block_reason(guide: PatientGuide) -> Optional[str]:
             return (
                 "Cannot publish: an edited statement failed verification "
                 f"({problems[0]}) Fix the wording or reject it."
+            )
+        if item.verification != "verified":
+            return (
+                "Cannot publish: a statement has not been reverified "
+                "against the protocol."
             )
 
     for attr, label in MANDATORY_SECTIONS:

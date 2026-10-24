@@ -10,6 +10,8 @@ Streamlit screens for the Plain-Language Patient Guide.
 from __future__ import annotations
 
 import hashlib
+import re
+import sqlite3
 from typing import Any, Mapping, Optional
 
 import streamlit as st
@@ -24,16 +26,18 @@ from agents.plain_language_agent import (
     generate_patient_guide,
     guide_to_markdown,
     reject_item,
+    reverify_item,
     unapprove_item,
 )
 from models.patient_models import PatientAnswer
 from models.plain_language_models import GuideItem, PatientGuide
-from services import guide_jobs
+from services import guide_jobs, review_store
 from services.guide_review import (
     ALL,
     APPROVED,
     EDITED,
     FILTERS,
+    NEEDS_REVERIFICATION,
     PENDING,
     REJECTED,
     edit_problems,
@@ -89,6 +93,8 @@ def item_status(item: GuideItem) -> str:
         return "✅ Approved"
     if state == REJECTED:
         return "❌ Rejected"
+    if state == NEEDS_REVERIFICATION:
+        return "🔁 Needs reverification"
     if item.needs_review:
         return "⚠️ Needs review"
     return "⏳ Waiting for approval"
@@ -104,7 +110,10 @@ def is_fully_approved_snapshot(guide: Any) -> bool:
         return False
     items = guide.all_items()
     return bool(items) and all(
-        item.analysis_complete is True and item.approved and not item.rejected
+        item.analysis_complete is True
+        and item.approved
+        and not item.rejected
+        and item.verification == "verified"
         for item in items
     )
 
@@ -114,6 +123,51 @@ def clear_guide() -> None:
     guide_jobs.jobs.discard(st.session_state.get(GUIDE_JOB_KEY))
     for key in (GUIDE_KEY, GUIDE_SOURCE_KEY, GUIDE_JOB_KEY, GUIDE_ERROR_KEY):
         st.session_state.pop(key, None)
+    purge_item_widget_state()
+
+
+_ITEM_WIDGET_KEY = re.compile(r"^guide_\d+_\d+_")
+
+
+def purge_item_widget_state() -> None:
+    """
+    Forget every per-statement widget value.
+
+    Widget keys are positional, so after a guide is regenerated or restored
+    the old text boxes would otherwise keep showing (and could re-apply) text
+    that belongs to a different guide.
+    """
+    for key in [k for k in st.session_state if _ITEM_WIDGET_KEY.match(str(k))]:
+        del st.session_state[key]
+
+
+def persist_review(action: str = "", detail: str = "") -> bool:
+    """
+    Save the working guide to SQLite, optionally logging a coordinator action.
+
+    Returns False (after showing an error) when the database write fails, so
+    the caller can avoid reporting a save that did not happen.
+    """
+    guide = get_guide()
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if guide is None or not protocol_id:
+        return True
+    record = st.session_state.get("coordinator_protocols", {}).get(protocol_id, {})
+    try:
+        review_store.save_draft(
+            protocol_id,
+            guide,
+            name=record.get("name", ""),
+            uploaded_name=st.session_state.get("uploaded_name"),
+            upload_fingerprint=st.session_state.get("uploaded_fingerprint"),
+            pipeline=st.session_state.get("pipeline_result"),
+        )
+        if action:
+            review_store.log_action(protocol_id, action, detail)
+    except (sqlite3.Error, OSError) as exc:
+        st.error(f"Your change could not be saved to the database: {exc}")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +213,11 @@ def _collect_generation(fingerprint: str) -> None:
     if job.status == guide_jobs.FAILED:
         st.session_state[GUIDE_ERROR_KEY] = str(job.error) or job.error.__class__.__name__
         return
+    purge_item_widget_state()
     st.session_state[GUIDE_KEY] = job.result
     st.session_state[GUIDE_SOURCE_KEY] = fingerprint
     st.session_state[GUIDE_ERROR_KEY] = None
+    persist_review("guide_generated", "Patient statements generated.")
 
 
 @st.fragment(run_every=2)
@@ -237,8 +293,23 @@ _SECTION_LABEL = {
 }
 
 
-def _status_chip(item: GuideItem) -> str:
+def _published_texts() -> set[str]:
+    """Statement wording that patients can currently read for this protocol."""
+    record = st.session_state.get("published_protocols", {}).get(
+        st.session_state.get("coordinator_protocol_id")
+    )
+    guide = record.get("guide") if isinstance(record, dict) else None
+    if not isinstance(guide, PatientGuide):
+        return set()
+    return {i.plain_text for i in guide.all_items()}
+
+
+def _status_chip(item: GuideItem, published: Optional[set[str]] = None) -> str:
     state = review_state(item)
+    if state in (APPROVED, EDITED) and published and item.plain_text in published:
+        return theme.chip("Published", "lav")
+    if state == NEEDS_REVERIFICATION:
+        return theme.chip("Needs reverification", "sun")
     if state == EDITED:
         return theme.chip("Edited · approved", "teal")
     if state == APPROVED:
@@ -263,7 +334,7 @@ def _render_review_item(
         st.html(
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">'
             f'<span class="ctai-label" style="margin:0">{count}{theme.e(_SECTION_LABEL.get(item.section, item.section))} · {theme.e(page)}</span>'
-            f'{_status_chip(item)}</div>'
+            f'{_status_chip(item, _published_texts())}</div>'
         )
         st.html(f'<div class="ctai-label">What the protocol says</div><div class="ctai-quote">{theme.e(item.original_text)}</div>')
         st.html(f'<div class="ctai-label">What patients would read</div><div class="ctai-plain">{theme.e(item.plain_text)}</div>')
@@ -278,7 +349,13 @@ def _render_review_item(
         col_yes, col_no, col_undo, _ = st.columns([1.3, 1.3, 1.3, 1.1])
         state = review_state(item)
 
-        with st.expander("Edit the wording", expanded=False):
+        saved_text = item.plain_text
+        unsaved_edit = False
+
+        with st.expander(
+            "Edit the wording",
+            expanded=state == NEEDS_REVERIFICATION,
+        ):
             new_text = st.text_area(
                 "Patient-friendly wording",
                 value=item.plain_text,
@@ -286,22 +363,63 @@ def _render_review_item(
                 height=90,
                 label_visibility="collapsed",
             )
+            unsaved_edit = new_text.strip() != saved_text
+            if unsaved_edit:
+                st.caption("You have unsaved changes. Click **Save edit** to keep them.")
             if st.button("Save edit", key=f"{key}_save"):
-                warnings = edit_item(item, new_text)
-                if warnings:
-                    st.session_state[f"{key}_msg"] = ("warning", "Saved, but please check: " + " ".join(warnings))
+                if not new_text.strip():
+                    st.session_state[f"{key}_msg"] = ("error", "The statement cannot be empty.")
+                elif not unsaved_edit:
+                    st.session_state[f"{key}_msg"] = ("info", "No changes to save.")
                 else:
-                    st.session_state[f"{key}_msg"] = ("success", "Saved. Approve it to publish.")
+                    warnings = edit_item(item, new_text)
+                    if persist_review("edited", f"{_SECTION_LABEL.get(item.section, item.section)}: {item.plain_text}"):
+                        text = (
+                            "Edit saved. Reverify it against the protocol, then "
+                            "approve it again; it is not visible to patients."
+                        )
+                        if warnings:
+                            text = "Edit saved, but please check: " + " ".join(warnings) + " " + text
+                        st.session_state[f"{key}_msg"] = (
+                            "warning" if warnings else "success",
+                            text,
+                        )
+                st.rerun()
+
+        if state == NEEDS_REVERIFICATION:
+            st.caption(
+                "Edited wording must be rechecked against the protocol excerpt "
+                "above before it can be approved."
+            )
+            if st.button("🔁 Reverify against protocol", key=f"{key}_reverify"):
+                problems = reverify_item(item)
+                if persist_review("reverified" if not problems else "reverify_failed", item.plain_text):
+                    if problems:
+                        st.session_state[f"{key}_msg"] = (
+                            "error",
+                            "Reverification failed: " + " ".join(problems),
+                        )
+                    else:
+                        st.session_state[f"{key}_msg"] = (
+                            "success",
+                            "Reverified against the protocol. You can now approve it.",
+                        )
                 st.rerun()
 
         edit_issues = edit_problems(item)
         if state in (APPROVED, EDITED):
             if col_yes.button("Withdraw approval", key=f"{key}_unapprove"):
                 unapprove_item(item)
+                if persist_review("approval_withdrawn", item.plain_text):
+                    st.session_state[f"{key}_msg"] = ("info", "Approval withdrawn.")
                 st.rerun()
         else:
             approval_allowed = (
-                guide_complete and item.analysis_complete is True and not edit_issues
+                guide_complete
+                and item.analysis_complete is True
+                and item.verification == "verified"
+                and not edit_issues
+                and not unsaved_edit
             )
             if col_yes.button(
                 "✅ Yes, approve",
@@ -309,30 +427,44 @@ def _render_review_item(
                 type="primary",
                 disabled=not approval_allowed,
             ):
-                warnings = []
-                if new_text.strip() != item.plain_text:
-                    warnings = edit_item(item, new_text)
-                if warnings:
+                if unsaved_edit:
                     st.session_state[f"{key}_msg"] = (
-                        "warning",
-                        "Saved, but not approved. Please fix: " + " ".join(warnings),
+                        "error",
+                        "Save your edit first, then reverify and approve it.",
                     )
                 elif guide_complete and item.analysis_complete is True:
-                    approve_item(item)
+                    try:
+                        approve_item(item)
+                    except ValueError as exc:
+                        st.session_state[f"{key}_msg"] = ("error", str(exc))
+                    else:
+                        if persist_review("approved", item.plain_text):
+                            st.session_state[f"{key}_msg"] = (
+                                "success",
+                                "Approved. It will reach patients when you publish.",
+                            )
                 else:
-                    st.warning(
+                    st.session_state[f"{key}_msg"] = (
+                        "error",
                         "Approval is disabled because analysis is incomplete "
-                        "or its completeness could not be verified."
+                        "or its completeness could not be verified.",
                     )
                 st.rerun()
         if state == REJECTED:
             if col_undo.button("↩ Reconsider", key=f"{key}_reconsider"):
                 reconsider_item(item)
+                if persist_review("reconsidered", item.plain_text):
+                    st.session_state[f"{key}_msg"] = ("info", "Statement returned to Pending.")
                 st.rerun()
         else:
             with col_no.container(key=f"{key}_reject_style"):
                 if st.button("❌ No, reject", key=f"{key}_reject"):
                     reject_item(item)
+                    if persist_review("rejected", item.plain_text):
+                        st.session_state[f"{key}_msg"] = (
+                            "success",
+                            "Rejected. It will never be shown to patients.",
+                        )
                     st.rerun()
         if edit_issues and state not in (APPROVED, EDITED):
             st.caption(
@@ -428,7 +560,8 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> None:
         disabled=not completeness_verified,
     ):
         if completeness_verified:
-            approve_all_unflagged(guide)
+            approved_now = approve_all_unflagged(guide)
+            persist_review("approved_all_checked", f"{approved_now} statement(s)")
         else:
             st.warning(
                 "Approval is disabled because analysis is incomplete or "

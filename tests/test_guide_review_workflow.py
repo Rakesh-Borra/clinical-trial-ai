@@ -7,7 +7,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from agents.guide_patient_agent import answer_patient_from_guide
-from agents.plain_language_agent import approve_item, edit_item, reject_item
+from agents.plain_language_agent import approve_item, edit_item, reject_item, reverify_item
 from services import guide_jobs
 from services.guide_review import (
     WITHHELD_MESSAGE,
@@ -157,6 +157,7 @@ def _mixed_guide():
     reject_item(_item(guide, "Follow-up"))
     edited = _item(guide, "inclusion condition 2")
     assert edit_item(edited, "Participants must meet inclusion condition 2 in full.") == []
+    assert reverify_item(edited) == []
     approve_item(edited)
     return result, guide
 
@@ -169,7 +170,8 @@ def test_review_states():
     _item(guide, "between 18 and 65").approved = False
     assert review_state(_item(guide, "between 18 and 65")) == "pending"
     assert state_counts(guide) == {
-        "all": 8, "pending": 1, "approved": 5, "edited": 1, "rejected": 1
+        "all": 8, "pending": 1, "needs_reverification": 0,
+        "approved": 5, "edited": 1, "rejected": 1,
     }
 
 
@@ -377,6 +379,7 @@ def test_filters_replace_the_checkbox_and_show_counts():
     assert labels == {
         "guide_filter_all": "All Statements (8)",
         "guide_filter_pending": "Pending (1)",
+        "guide_filter_needs_reverification": "Needs Reverification (0)",
         "guide_filter_approved": "Approved (5)",
         "guide_filter_edited": "Edited (1)",
         "guide_filter_rejected": "Rejected (1)",
@@ -394,7 +397,7 @@ def test_each_filter_shows_only_its_statements(key, expected):
     at = _click(_prepare_review_app(result, guide), f"guide_filter_{key}")
     assert len(_cards(at)) == expected
     assert at.button(key=f"guide_filter_{key}").proto.type == "primary"
-    others = [k for k in ("all", "pending", "approved", "edited", "rejected") if k != key]
+    others = [k for k in ("all", "pending", "needs_reverification", "approved", "edited", "rejected") if k != key]
     assert all(at.button(key=f"guide_filter_{o}").proto.type == "secondary" for o in others)
 
 

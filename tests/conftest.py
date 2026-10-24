@@ -6,6 +6,12 @@ def _offline_rewriter(original, section, feedback=None):
 
 
 @pytest.fixture(autouse=True)
+def isolated_review_db(tmp_path, monkeypatch):
+    """Every test gets its own empty SQLite file; data/ctai.db is never touched."""
+    monkeypatch.setenv("CTAI_DB_PATH", str(tmp_path / "ctai_test.db"))
+
+
+@pytest.fixture(autouse=True)
 def offline_guide_model(request, monkeypatch):
     """
     Opening the Review page now generates statements in the background.

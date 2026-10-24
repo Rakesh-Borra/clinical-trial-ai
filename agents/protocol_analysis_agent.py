@@ -1,6 +1,8 @@
 
 import json
 import os
+import re
+import time
 from typing import List, Optional, Tuple, Type, TypeVar
 
 from pydantic import BaseModel, Field
@@ -19,6 +21,7 @@ from services.eligibility_rescue import (
 )
 from services.model_provider import chat_completion
 from services.protocol_chunker import chunk_protocol
+from services.section_classifier import PASS_A_CATEGORIES, PASS_B_CATEGORIES
 from services.source_verifier import normalize_text
 
 MODEL_NAME = "qwen3:4b"
@@ -28,6 +31,16 @@ MODEL_NAME = "qwen3:4b"
 # 16384 fits ~60,000 characters of protocol text and runs on a 16 GB laptop.
 # Override with the CTAI_NUM_CTX environment variable (e.g. 8192 on 8 GB RAM).
 NUM_CTX = int(os.getenv("CTAI_NUM_CTX", "16384"))
+
+# Extraction is structured JSON, so Qwen3's hidden reasoning adds latency but
+# little accuracy. Thinking is off by default; set CTAI_EXTRACTION_THINK=1 to
+# restore it. NUM_PREDICT bounds runaway generations (a truncated answer is
+# already reported as a failed chunk). Both only affect Ollama requests.
+EXTRACTION_THINK = os.getenv("CTAI_EXTRACTION_THINK", "0") == "1"
+NUM_PREDICT = int(os.getenv("CTAI_EXTRACTION_NUM_PREDICT", "6144"))
+
+# Bump when prompts or schemas change so cached analyses are not reused.
+ANALYSIS_VERSION = "3"
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -70,6 +83,10 @@ SOURCE PAGE EXTRACTION RULES:
   [SOURCE PAGE N] marker.
 - If the source page cannot be determined, use null.
 - Never invent page numbers.
+- Text between [TABLE] and [/TABLE] is a table from that page: each line is
+  one row and cells are separated by " | ". The first row is usually the
+  column header. Read each value under its own column, and copy numbers,
+  units, and visit names exactly as written.
 """
 
 
@@ -78,7 +95,12 @@ def _chat_structured(prompt: str, schema_model: Type[T]) -> T:
         prompt,
         schema_model,
         model=MODEL_NAME,
-        options={"temperature": 0, "num_ctx": NUM_CTX},
+        options={
+            "temperature": 0,
+            "num_ctx": NUM_CTX,
+            "num_predict": NUM_PREDICT,
+        },
+        think=EXTRACTION_THINK,
     )
     data = json.loads(content)
     return schema_model.model_validate(data)
@@ -501,6 +523,57 @@ def _merge_chunk_analyses(
     return analysis, warnings
 
 
+_PASS_A_HINT = re.compile(
+    r"inclusion|exclusion|eligib|criteri|adverse|safety|risk|side effect|"
+    r"contraindic|pregnan|withdraw|discontinu|toxicit|title|protocol (?:no|number|id)|"
+    r"\bNCT\d",
+    re.IGNORECASE,
+)
+_PASS_B_HINT = re.compile(
+    r"visit|schedule|\bday \d|\bweek|month|procedure|assessment|blood|sample|"
+    r"laborator|\btest|screening|\bdos(?:e|ing)|inject|infus|scan|x-ray|ecg|"
+    r"biops|questionnaire|examination",
+    re.IGNORECASE,
+)
+
+
+def route_passes(
+    chunk_text: str,
+    is_first: bool,
+    categories: Tuple[str, ...] = (),
+    fully_classified: bool = False,
+    has_table: bool = False,
+) -> Tuple[bool, bool]:
+    """
+    Decide which extraction passes a chunk needs.
+
+    A pass is skipped only when the section categories (from headings) say the
+    chunk belongs to the other pass AND the text has no cue for the skipped
+    pass. A missing keyword alone never skips a pass: without reliable
+    heading categories, tables, or with any cue, both passes run.
+    """
+    if not fully_classified or not categories:
+        return True, True
+    cats = set(categories)
+    wants_a = (
+        is_first
+        or bool(cats & PASS_A_CATEGORIES)
+        or bool(_PASS_A_HINT.search(chunk_text))
+    )
+    wants_b = (
+        has_table
+        or bool(cats & PASS_B_CATEGORIES)
+        or bool(_PASS_B_HINT.search(chunk_text))
+    )
+    # Categories such as "responsibilities" or "administrative" map to
+    # neither pass, so be conservative and run both.
+    if cats - PASS_A_CATEGORIES - PASS_B_CATEGORIES:
+        return True, True
+    if not wants_a and not wants_b:
+        return True, True
+    return wants_a, wants_b
+
+
 def analyze_protocol_in_chunks(
     protocol_text: str,
     *,
@@ -508,6 +581,9 @@ def analyze_protocol_in_chunks(
     max_input_chars: int,
     max_calls: int,
     rescue_max_chars: int,
+    chunks: Optional[list] = None,
+    route: bool = False,
+    max_seconds: Optional[float] = None,
 ) -> Tuple[ProtocolAnalysis, List[str], List[dict], List[str], int]:
     """
     Analyze every bounded chunk, then attempt eligibility rescue at most once.
@@ -528,22 +604,35 @@ def analyze_protocol_in_chunks(
         raise ValueError("Eligibility rescue input budget must be positive.")
     if len(protocol_text) > max_input_chars:
         raise ValueError(
-            f"Long protocol has {len(protocol_text)} characters, exceeding "
-            f"the configured input limit of {max_input_chars}; no model calls "
-            "were made."
+            f"This protocol has {len(protocol_text)} characters of "
+            "patient-relevant text, exceeding the configured input limit of "
+            f"{max_input_chars}. No model calls were made. Split the PDF "
+            "into smaller parts or raise CTAI_PROTOCOL_MAX_INPUT_CHARS."
         )
 
-    chunking = chunk_protocol(protocol_text, max_chars=chunk_chars)
-    chunks = list(chunking.chunks)
+    chunk_warnings: list[str] = []
+    if chunks is None:
+        chunking = chunk_protocol(protocol_text, max_chars=chunk_chars)
+        chunks = list(chunking.chunks)
+        chunk_warnings = list(chunking.warnings)
+    else:
+        chunks = list(chunks)
     max_chunks = (max_calls - 1) // 2
     if len(chunks) > max_chunks:
         required_calls = len(chunks) * 2 + 1
         raise ValueError(
-            f"Long protocol requires up to {required_calls} model calls for "
-            f"{len(chunks)} chunks, exceeding the configured cap of "
-            f"{max_calls}; no model calls were made."
+            f"This protocol needs up to {required_calls} model calls "
+            f"({len(chunks)} chunks), exceeding the configured cap of {max_calls}. No model "
+            "calls were made. Split the PDF into smaller parts, or raise "
+            "CTAI_PROTOCOL_MAX_CALLS (and CTAI_ANALYSIS_MAX_SECONDS) if you "
+            "accept a longer run."
         )
 
+    class _Chunking:
+        warnings = chunk_warnings
+
+    chunking = _Chunking
+    deadline = time.monotonic() + max_seconds if max_seconds else None
     warnings = list(chunking.warnings)
     incomplete_reasons: list[str] = []
     failed_chunks: list[dict] = []
@@ -553,17 +642,38 @@ def analyze_protocol_in_chunks(
     if chunking.warnings:
         incomplete_reasons.extend(chunking.warnings)
 
-    total_passes = len(chunks) * 2
+    plans = [
+        route_passes(
+            chunk.text,
+            index == 0,
+            getattr(chunk, "categories", ()),
+            getattr(chunk, "fully_classified", False),
+            getattr(chunk, "has_table", False),
+        ) if route else (True, True)
+        for index, chunk in enumerate(chunks)
+    ]
+    total_passes = sum(a + b for a, b in plans)
     report_stage("analyze", 0, total_passes)
-    for chunk in chunks:
+    for chunk, (run_a, run_b) in zip(chunks, plans):
         chunk_failures: list[str] = []
         pass_a: Optional[MetadataEligibilitySafetyExtraction] = None
         pass_b: Optional[VisitsProceduresExtraction] = None
 
-        for pass_name, extract in (
-            ("Pass A", _pass_a_metadata_eligibility_safety),
-            ("Pass B", _pass_b_visits_procedures),
+        for pass_name, extract, wanted in (
+            ("Pass A", _pass_a_metadata_eligibility_safety, run_a),
+            ("Pass B", _pass_b_visits_procedures, run_b),
         ):
+            if not wanted:
+                continue
+            if deadline is not None and time.monotonic() > deadline:
+                detail = (
+                    f"{pass_name} skipped: the analysis time budget of "
+                    f"{max_seconds:.0f}s was reached. Raise "
+                    "CTAI_ANALYSIS_MAX_SECONDS or analyze a smaller document."
+                )
+                chunk_failures.append(detail)
+                warnings.append(f"Chunk {chunk.index + 1}: {detail}")
+                continue
             calls_made += 1
             try:
                 result = extract(chunk.text)

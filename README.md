@@ -1,6 +1,6 @@
 # Clinical Trial AI
 
-Hackathon MVP that turns dense clinical trial protocol PDFs into **verified, structured study information** and **source-backed answers** for research coordinators and patients.
+An AI-assisted prototype that helps clinical trial coordinators turn dense protocol PDFs into **source-linked, coordinator-approved patient information**, and lets patients ask questions answered only from that approved, published content.
 
 **Repository:** [https://github.com/Rakesh-Borra/clinical-trial-ai](https://github.com/Rakesh-Borra/clinical-trial-ai)
 
@@ -16,6 +16,8 @@ This project is an **educational / research prototype**. It does **not** provide
 
 ### Results at a glance
 
+> Measured on an earlier version of the pipeline, before section classification, table extraction, caching and the conversational Patient Assistant were added. They have not been re-measured; see [`EVALUATION.md`](EVALUATION.md).
+
 | What we measured | Result |
 |---|---|
 | Risky patient questions (eligibility decisions, medical advice) answered safely | **100%** (25/25, incl. 9 never seen during development) |
@@ -27,103 +29,126 @@ This project is an **educational / research prototype**. It does **not** provide
 
 ---
 
-## 1. Overview
+## 1. Problem and proposed solution
 
-Clinical protocols are long and hard to skim. Clinical Trial AI helps by:
+### The problem
 
-1. Uploading a protocol PDF in a Streamlit web app
-2. Extracting text (with OCR fallback for scanned pages)
-3. Analyzing the protocol with a **local** large language model (`qwen3:4b` via Ollama)
-4. Checking extracted statements against source pages
-5. Showing a protocol summary plus:
-   - **Coordinator Assistant** — factual lookup for research staff
-   - **Patient Guide Review** — the AI writes a plain-language patient guide, checks its own output, retries, and flags what it cannot fix; a coordinator edits and **approves** each item
-   - **Patient Assistant** — the **approved** guide only, a medical-word glossary, and Q&A with safe refusals. Answers use only approved guide items; anything not yet approved is reported as still under review
+Clinical trial protocols are written for regulators, investigators and ethics boards. They are long and full of medical terminology, eligibility criteria, procedures, visit schedules, risks and participant responsibilities. **Patients and prospective participants** often struggle to understand them, and **clinical trial coordinators** must explain this material accurately and in plain language without changing its medical meaning.
 
-Analysis uses Ollama once per uploaded PDF (cached in the session). The patient guide uses Ollama once more, when the coordinator clicks **Generate patient guide**. Coordinator and Patient Q&A are **deterministic**: they only reuse cached results and **do not** call Ollama.
+Accuracy and traceability matter because a small wording change (a dropped number, an altered threshold, a softened risk) can change what a participant believes they are agreeing to. Every statement shown to a patient therefore needs to be traceable to a protocol page, and a **human coordinator must review it** before patients see it. AI-generated text can omit or distort information, so it is treated as a draft, never as a source of truth.
 
----
+This prototype **does not replace** the official informed-consent document, the study team, or any clinician.
 
-## 2. Key features
+### The proposed solution
 
-- **PDF text extraction** with PyMuPDF (`pymupdf`)
-- **OCR fallback** for image-only / scanned pages (`pytesseract` + system Tesseract), and for PDFs whose text is **scrambled by a broken font** (detected automatically)
-- **Local protocol analysis** with Ollama model **`qwen3:4b`**
-- **Source-page verification** (`exact_match` and related statuses)
-- **Accuracy / completeness checks** after extraction (warnings surfaced in the UI)
-- **Coordinator Assistant** — inclusion/exclusion, visits (including visit counts), procedures, safety, metadata
-- **Plain-Language Patient Guide** — AI rewrite → self-check (numbers kept, no advice or eligibility wording) → retry with feedback → flag for human review
-- **Coordinator approval** — patients only ever see items a coordinator approved
-- **Patient Assistant** — approved guide, medical-word glossary ("What does HbA1c mean?"), safe refusals
-- **Evaluation framework** — answer keys for real protocols, safety question bank, reproducible scoring ([`EVALUATION.md`](EVALUATION.md))
-- **Streamlit UI** — upload, analyze once, then ask questions from cached results
-- **Safety posture** — research disclaimers; no final eligibility decisions; no medical advice
+Clinical Trial AI is an AI-assisted workflow. Each capability below is implemented in this repository:
+
+1. Accepts a clinical trial protocol PDF (Streamlit upload).
+2. Extracts text (with OCR fallback), page numbers and ruled tables.
+3. Classifies sections and filters for patient-relevant content, keeping the original pages intact for verification.
+4. Extracts structured study details with a local LLM (`qwen3:4b` through Ollama) and generates plain-language, source-linked patient statements.
+5. Verifies extracted and rewritten statements against protocol evidence.
+6. Lets a **human coordinator** review, edit, approve, reject, publish and unpublish statements, persisted in SQLite.
+7. Lets patients ask questions that are answered only from approved, currently published statements.
+
+> This is an educational / research prototype. It is not clinically validated, not regulatory-compliant, and not production-ready. It does not provide medical advice, diagnose conditions, or decide whether anyone is eligible for a trial.
 
 ---
 
-## 3. Architecture
+## 2. Three-agent architecture
+
+| Agent | Module | What it does | Uses an LLM? |
+|---|---|---|---|
+| **1. Protocol Analysis Agent** | `agents/protocol_analysis_agent.py` | Extracts study metadata, eligibility, visits, procedures and safety information from section-aware chunks, with source page numbers | Yes (`qwen3:4b`) |
+| **2. Verification Agent** | `services/source_verifier.py`, `services/protocol_accuracy.py`, and the rewrite checks in `agents/plain_language_agent.py` (`check_rewrite`, `reverify_item`) | Checks statements against source pages, grounds metadata, repairs page references, checks eligibility completeness, and checks that plain-language rewrites keep every number and contain no advice | No (deterministic rules) |
+| **3. Patient Assistant Agent** | `agents/guide_patient_agent.py` (with `agents/patient_agent.py` for intent patterns, `services/chat_intents.py`, `services/chat_grounding.py`) | Answers patient questions from approved, published statements only | Optional (off by default) |
+
+The **coordinator is a human reviewer** using the coordinator interface; there is no Coordinator AI agent (an earlier deterministic coordinator Q&A module was removed). The plain-language rewrite step (`agents/plain_language_agent.py`) is a helper used between analysis and review: it asks the model for a patient-friendly rewrite and runs the verification checks above.
+
+Everything else (`services/`, `models/`, `ui/`) are helper modules that support these roles; they are not separate agents. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for details.
+
+---
+
+## 3. What is implemented
+
+### PDF processing and analysis
+- PDF text extraction with PyMuPDF, page numbers preserved; OCR fallback (`pytesseract` + Tesseract) for scanned or font-scrambled pages
+- Ruled-table extraction (rows, columns and values kept) as an extra view, never replacing page text (`CTAI_EXTRACT_TABLES=0` disables it)
+- Section classification (`services/section_classifier.py`): ICH M11-style and common protocol headings mapped to purpose, eligibility, visits, procedures, risks, safety, consent, withdrawal, responsibilities, administrative. Protocol amendments are not classified as a separate category.
+- Section-aware, token-aware chunking (`services/section_chunker.py`)
+- Conservative patient-relevance filtering at block level (`services/patient_relevance.py`): administrative-only sections are skipped, while safety wording found inside administrative sections is retained. All original pages remain available for verification.
+- Category-based pass routing: an extraction pass is skipped only when section categories and keyword cues agree; a missing keyword alone never skips a pass
+- SQLite cache of completed analyses (`services/analysis_cache.py`), keyed on document text and processing settings
+- Completeness audit (`services/completeness_audit.py`) flagging missing or uncertain patient-relevant categories
+- Performance instrumentation (`services/performance.py`): stage timings, chunk and model-call counts, token counts when the provider reports them
+- Input and model-call limits (320,000 characters, 65 calls, 1,800 s analysis budget by default) with actionable error messages
+
+### Human coordinator
+- Review each statement with its source page, edit and save, approve, reject
+- Edited statements must be reverified and then approved again before publishing
+- Publication validation, patient-view preview, publish and unpublish
+- Review state, drafts, publications and action history stored in SQLite (`data/ctai.db`)
+
+### Patient Assistant
+- Greeting, thanks and small talk handled without retrieval or model calls, including common misspellings
+- Typo correction against the guide vocabulary, intent recognition, follow-up questions using previous answers, short clarification questions when ambiguous
+- Retrieval limited to approved, currently published statements; citations show protocol pages
+- Grounding validation: cited statements must still be approved and numbers must come from approved text
+- Refusals for medical advice and personal eligibility decisions; "ask your study team" replies for topics the guide does not cover (costs, withdrawal, how procedures feel, contacting the team)
+- Optional model-based rewording (`CTAI_CHAT_LLM=1`, off by default) that is rejected and replaced by the deterministic answer if it adds numbers, advice or URLs
+
+### Evaluation
+- Safety question bank and extraction answer keys under `evaluation/` (see [`EVALUATION.md`](EVALUATION.md))
+
+---
+
+## 4. Workflow
 
 ```text
-PDF upload (Streamlit)
-        │
-        ▼
-Text extraction / OCR fallback
-        │
-        ▼
-Protocol analysis (Ollama + qwen3:4b, num_ctx 16,384)
-  • focused extraction passes
-  • optional eligibility rescue when needed
-  • deterministic accuracy checks
-        │
-        ▼
-Source-page verification
-        │
-        ▼
-Cached pipeline result (session state)
-        │
-        ├─► Protocol Summary tab
-        ├─► Coordinator Assistant (deterministic Q&A, no extra Ollama calls)
-        ├─► Patient Guide Review (Ollama rewrite → self-check → retry → flag
-        │                          → coordinator edits / approves)
-        └─► Patient Assistant (approved guide + glossary + deterministic Q&A)
+Protocol PDF (Streamlit upload)
+  → PDF extraction (text, OCR fallback, tables, page numbers)
+  → Section classification + chunking + patient-relevance filtering
+  → Protocol analysis (Agent 1, Ollama qwen3:4b; cached in SQLite)
+  → Source verification and accuracy checks (Agent 2)
+  → Plain-language statement generation + rewrite checks
+  → Human coordinator review: edit, reverify, approve / reject
+  → Publish (validated) → SQLite publication snapshot
+  → Patient Assistant (Agent 3) answers from published statements only
 ```
 
-| Stage | Entry point | Uses Ollama? |
-|-------|-------------|--------------|
-| Analyze PDF | `services/protocol_pipeline.py` → `analyze_protocol_pdf()` | **Yes** (`qwen3:4b`) |
-| Coordinator Q&A | `services/coordinator_query.py` → `answer_from_pipeline_result()` | **No** |
-| Patient guide | `agents/plain_language_agent.py` → `generate_patient_guide()` | **Yes** (short rewrites, "thinking" off) |
-| Patient Q&A | `services/patient_query.py` → `answer_patient_from_pipeline_result()` | **No** |
-| UI | `app.py`, `ui/patient_guide_tab.py` | Only on **Analyze protocol** and **Generate patient guide** |
+| Stage | Entry point |
+|-------|-------------|
+| Analyze PDF | `services/protocol_pipeline.py` → `analyze_protocol_pdf()` |
+| Patient statements | `agents/plain_language_agent.py` → `generate_patient_guide()` |
+| Review / publish | `app.py`, `ui/patient_guide_tab.py`, `services/guide_review.py`, `services/review_store.py` |
+| Patient chat | `ui/patient_view.py` → `agents/guide_patient_agent.py` → `answer_patient_from_guide()` |
 
-The model's context window is set to 16,384 tokens (~60,000 characters of protocol text). On a computer with 8 GB of RAM, lower it with `export CTAI_NUM_CTX=8192` before starting the app.
+The model context window is 16,384 tokens by default. On a computer with 8 GB of RAM, lower it with `export CTAI_NUM_CTX=8192`.
 
-### Optional OpenRouter model provider
+### Configuration (environment variables)
 
-Ollama with `qwen3:4b` remains the default. To opt in to OpenRouter, provide
-these settings through the process environment or an approved secret manager:
+| Variable | Default | Purpose |
+|---|---|---|
+| `CTAI_MODEL_PROVIDER` | `ollama` | `ollama` (supported) or `openrouter` (see below) |
+| `CTAI_DB_PATH` | `data/ctai.db` | SQLite file for drafts, publications, history, analysis cache |
+| `CTAI_NUM_CTX` | `16384` | Ollama context window |
+| `CTAI_EXTRACTION_NUM_PREDICT` | `6144` | Output token cap for extraction |
+| `CTAI_EXTRACTION_THINK` | `0` | Qwen3 thinking mode for extraction |
+| `CTAI_PATIENT_RELEVANCE_FILTER` | `1` | Enable patient-relevance filtering |
+| `CTAI_EXTRACT_TABLES` | `1` | Enable table extraction |
+| `CTAI_PROTOCOL_CHUNK_TOKENS` / `CTAI_PROTOCOL_CHUNK_CHARS` | `2500` / `8000` | Chunk size limits |
+| `CTAI_PROTOCOL_MAX_INPUT_CHARS` | `320000` | Maximum protocol text accepted |
+| `CTAI_PROTOCOL_MAX_CALLS` | `65` | Maximum model calls per analysis |
+| `CTAI_ANALYSIS_MAX_SECONDS` | `1800` | Analysis time budget |
+| `CTAI_CHAT_LLM` | `0` | Optional model rewording of chat answers |
 
-```bash
-export CTAI_MODEL_PROVIDER=openrouter
-export CTAI_OPENROUTER_MODEL=deepseek/deepseek-v4.1-flash-1017
-export CTAI_MODEL_TIMEOUT_SECONDS=600
-export CTAI_OPENROUTER_MAX_OUTPUT_TOKENS=8192
-```
+### OpenRouter (planned, not yet validated)
 
-Set `OPENROUTER_API_KEY` in the shell environment or approved secret manager
-before launching. The key is read only from that environment variable; do not
-put it in source, tests, prompts, or committed files. The application does not
-automatically load `.env` files. OpenRouter requests require a structured-output-capable
-endpoint, disable provider fallback, and request zero-data-retention/data
-collection restrictions. A compatible endpoint may not be available, in
-which case the request fails rather than switching providers. Review protocol
-ownership and cloud-processing authorization before transmitting any protocol
-text. Selecting OpenRouter does not change the long-protocol input or model
-call caps.
+`services/model_provider.py` contains an opt-in OpenRouter code path (`CTAI_MODEL_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `CTAI_OPENROUTER_MODEL`). It has **not** been validated end-to-end and the full integration is planned future work. **Ollama with `qwen3:4b` is the supported configuration.** If you try it, supply the key via the process environment only (the app does not load `.env`), and confirm you are authorised to send protocol text to a cloud service. Selecting OpenRouter does not change the input or call caps.
 
 ---
 
-## 4. Prerequisites
+## 5. Prerequisites
 
 Install these before you run the app:
 
@@ -150,7 +175,7 @@ We do **not** claim full end-to-end verification of every Windows or Linux deskt
 
 ---
 
-## 5. Clone the repository
+## 6. Clone the repository
 
 ```bash
 git clone https://github.com/Rakesh-Borra/clinical-trial-ai.git
@@ -159,7 +184,7 @@ cd clinical-trial-ai
 
 ---
 
-## 6. Virtual environment and dependencies
+## 7. Virtual environment and dependencies
 
 Always use a virtual environment so project packages do not conflict with system Python.
 
@@ -212,7 +237,7 @@ The **Tesseract binary** is separate from `pip` (see Prerequisites).
 
 ---
 
-## 7. Install and run Ollama
+## 8. Install and run Ollama
 
 Protocol **Analyze** will fail if Ollama is not running or `qwen3:4b` is missing.
 
@@ -242,7 +267,7 @@ Keep Ollama running in the background while you use **Analyze protocol** in Stre
 
 ---
 
-## 8. Launch Streamlit
+## 9. Launch Streamlit
 
 With your virtual environment **activated** and Ollama running:
 
@@ -258,45 +283,41 @@ If the terminal prints a different Local URL, use that URL instead.
 
 ---
 
-## 9. First-time walkthrough
+## 10. First-time walkthrough
 
 1. Open the Streamlit app. You land on the **Welcome to Clinical Trial AI** page.
 2. Choose **Sign in as coordinator** (demo sign-in: no password).
-3. **Step 1 · Upload**: upload **`data/sample_clinical_protocol.pdf`**, pick the document type, click **Analyze protocol**. **The first analysis can take several minutes** on a laptop because it runs local `qwen3:4b` extraction passes.
-4. Walk through the four steps:
+3. **Step 1 · Upload**: upload **`data/sample_clinical_protocol.pdf`**, pick the document type, click **Analyze protocol**. **Analysis can take several minutes** with local `qwen3:4b`; a completed analysis of the same text and settings is reused from the SQLite cache.
+4. Walk through the three steps:
 
 | Step | What to look for |
 |------|------------------|
 | **1 · Upload** | Choose the document type; analyze once |
-| **2 · Summary** | Title/ID, inclusion/exclusion, visits, procedures, safety, warnings, with page numbers |
-| **3 · Review** | **Generate patient statements**, then mark each one accurate (**Yes, approve**) or **No, reject**; edit wording |
-| **4 · Publish** | Counts, coordinator Q&A, **Preview as a patient** |
+| **2 · Summary** | Title/ID, inclusion/exclusion, visits, procedures, safety, warnings, completeness notes, with page numbers |
+| **3 · Review** | Generate patient statements; compare each with its source excerpt and page; edit and save, **reverify** edited text, approve or reject; **preview as a patient**; publish or unpublish |
 
-5. Click **Switch role** and sign in as a **patient**: the approved study guide is on the left and an adjustable chat assistant is on the right. Roles share data only inside the same browser session.
+   Review states are **Pending Review**, **Approved**, **Rejected**, **Needs Reverification** and **Published**. Publishing is blocked while any statement is pending, entirely rejected, unverified or edited-but-not-reverified.
+5. Click **Switch role** and sign in as a **patient**: the published guide is on the left and the chat assistant on the right. Patients see only published content. Withdrawing (unpublishing) removes it from the Patient Assistant.
 
 ### Example questions
 
-**Coordinator-style**
-
-- What are the inclusion criteria?
-- How many visits are scheduled?
-- What procedures are performed?
-
-**Patient-style**
+**Patient-style** (after a guide is published)
 
 - When do I need to visit?
 - What does HbA1c mean?
-- Am I eligible for this trial?
+- Am I eligble? (misspellings are tolerated)
+- What about the second one? (follow-up)
+- Am I eligible for this trial? (safely refused as a personal decision)
 
 ### Expected safe behavior for eligibility
 
 Questions like **“Am I eligible for this trial?”** should **refuse a personal yes/no decision**. The assistant may still show **general verified criteria** for discussion with the study team, plus clear disclaimers. It must **not** decide enrollment for a specific person.
 
-After analysis succeeds once for an upload, asking more questions should be fast (cached pipeline result).
+Patient answers are deterministic by default and make no model call.
 
 ---
 
-## 10. Run tests
+## 11. Run tests
 
 With the virtual environment activated, from the repo root:
 
@@ -304,7 +325,7 @@ With the virtual environment activated, from the repo root:
 python -m pytest -q
 ```
 
-162 tests; all should pass (one live-OCR test is skipped if Tesseract is not installed). These tests are mostly deterministic and **mock** Ollama / pipeline calls where needed. You do **not** need a long live Ollama run to execute the pytest suite.
+The suite (492 tests at the last run) is deterministic and **mocks** Ollama / pipeline calls where needed. You do **not** need a long live Ollama run to execute the pytest suite.
 
 Optional: there are developer scripts under `scripts/` for manual pipeline experiments; those may call Ollama and can be slow. `pytest` only collects `tests/` (see `pytest.ini`).
 
@@ -319,7 +340,7 @@ Re-running the models on the real protocols needs the PDFs in `data/protocols/`;
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Problem | What to try |
 |---------|-------------|
@@ -336,68 +357,71 @@ Re-running the models on the real protocols needs the PDFs in `data/protocols/`;
 
 ---
 
-## 12. Project structure
+## 13. Project structure
 
 Important paths in this repository:
 
 ```text
 clinical-trial-ai/
-├── app.py                      # Streamlit MVP UI
-├── requirements.txt            # Python dependencies
-├── README.md                   # This file
-├── CONTRIBUTING.md             # Team Git workflow
-├── ARCHITECTURE.md             # Higher-level design notes (may include future ideas)
-├── TASKS.md                    # Milestone tracking
+├── app.py                          # Streamlit app: coordinator workflow, publication, role routing
+├── requirements.txt
 ├── agents/
-│   ├── protocol_analysis_agent.py   # Ollama/Qwen extraction (qwen3:4b)
-│   ├── coordinator_assistant_agent.py
-│   ├── patient_agent.py             # Deterministic patient Q&A + safe refusals
-│   └── plain_language_agent.py      # Patient guide: rewrite → check → retry → flag
-├── ui/
-│   ├── theme.py                # Colors, CSS, logo/illustrations
-│   ├── landing.py              # Welcome page, role sign-in, top bar
-│   ├── patient_view.py         # Patient workspace: guide left, chat right
-│   └── patient_guide_tab.py    # Statement review (approve / reject / edit)
+│   ├── protocol_analysis_agent.py  # Agent 1: chunked extraction, pass routing (qwen3:4b)
+│   ├── plain_language_agent.py     # Plain-language rewrite + checks, edit/reverify/approve/reject
+│   ├── guide_patient_agent.py      # Agent 3: conversational answers from published guide
+│   └── patient_agent.py            # Intent patterns, refusals, legacy deterministic Q&A
 ├── services/
-│   ├── pdf_processor.py        # PDF text + OCR fallback
-│   ├── protocol_pipeline.py    # analyze_protocol_pdf()
-│   ├── protocol_accuracy.py    # Grounding / completeness checks
-│   ├── eligibility_rescue.py   # Conditional eligibility rescue
-│   ├── source_verifier.py      # Page verification
-│   ├── coordinator_query.py    # Coordinator wrapper
-│   └── patient_query.py        # Patient wrapper
-├── models/
-│   ├── protocol_models.py
-│   ├── coordinator_models.py
-│   ├── patient_models.py
-│   └── plain_language_models.py
-├── evaluation/                 # Answer keys, question bank, scoring, results
-├── docs/PROJECT_BRIEF.md       # Problem, users, agentic design, Definition of Done
-├── EVALUATION.md               # Evaluation results and limitations
-├── tests/                      # pytest suite
-├── data/
-│   └── sample_clinical_protocol.pdf   # Demo protocol (synthetic)
-└── scripts/                    # Optional manual smoke scripts (may call Ollama)
+│   ├── pdf_processor.py            # Text, OCR fallback, table extraction, page numbers
+│   ├── section_classifier.py       # Heading/content section categories
+│   ├── patient_relevance.py        # Block-level patient-relevance filter
+│   ├── section_chunker.py / protocol_chunker.py  # Section- and token-aware chunks
+│   ├── protocol_pipeline.py        # analyze_protocol_pdf() orchestration
+│   ├── analysis_cache.py           # SQLite analysis cache
+│   ├── analysis_jobs.py / guide_jobs.py  # Background job managers
+│   ├── analysis_progress.py        # Progress reporting
+│   ├── performance.py              # Timing and token instrumentation
+│   ├── completeness_audit.py       # Missing/uncertain category audit
+│   ├── source_verifier.py / protocol_accuracy.py  # Verification (Agent 2)
+│   ├── eligibility_rescue.py       # Conditional eligibility re-extraction
+│   ├── guide_review.py             # Review states, publish validation, patient-visible snapshot
+│   ├── review_store.py             # SQLite drafts, publications, history
+│   ├── chat_intents.py / chat_grounding.py  # Chat intents, typo handling, grounding checks
+│   ├── model_provider.py           # Model-provider abstraction (Ollama; OpenRouter path unvalidated)
+│   └── patient_query.py            # Wrapper over the legacy deterministic Q&A
+├── models/                         # Pydantic models (protocol, patient, plain-language guide)
+├── ui/                             # theme, landing/sign-in, patient view, review tab, chat store
+├── evaluation/                     # Answer keys, question bank, scoring, results
+├── tests/                          # pytest suite
+├── data/                           # sample_clinical_protocol.pdf; ctai.db is created locally (git-ignored)
+├── docs/PROJECT_BRIEF.md, EVALUATION.md, ARCHITECTURE.md, CONTRIBUTING.md, TASKS.md
+└── scripts/                        # Optional manual smoke scripts (may call Ollama)
 ```
 
-`ARCHITECTURE.md` also describes **planned** work (FastAPI, database, retrieval) that is not part of this MVP. The **running MVP path** is Streamlit → `analyze_protocol_pdf` → coordinator/patient wrappers as above. SQLite storage is **not** required to run this MVP.
+---
+
+## 14. Limitations and roadmap
+
+### Known limitations
+- **Educational / research prototype only.** Not clinically validated, not regulatory-compliant, not production-ready, and not for clinical decision-making or real patient care.
+- `exact_match` verification means the statement text was found on a source page. It is **not** proof of clinical correctness or completeness.
+- **No medical advice and no personal eligibility decisions.**
+- Demo content is synthetic/sample material. Do not upload real patient-identifying data.
+- Analysis depends on a local Ollama install and machine resources; local analysis of long protocols is slow, and recall dropped to 23% on an 86-page protocol in the earlier evaluation. Safety sections were the weakest category. Inputs over 320,000 characters or 65 model calls are rejected with an actionable message. No speed-up from the latest optimisations has been measured on a full protocol.
+- Section/heading detection is heuristic; table extraction handles ruled tables only and its text appears alongside the page text in model input.
+- Patient answers are mostly the approved statements themselves; unusual phrasing may get a safe "cannot answer" reply. The assistant is conservative about topics such as blood collection.
+- Role sign-in is a demo (no password) and not a security boundary.
+- Evaluation figures in this README predate the latest pipeline changes.
+
+### Planned improvements
+- OpenRouter integration and validation
+- Further performance optimisation, measured on full-length protocols
+- Additional evaluation and reliability work
+
+Always read the full protocol and involve qualified clinicians and the study team for real enrollment questions.
 
 ---
 
-## 13. Limitations and safety
-
-- **Educational / research prototype only** — not for clinical decision-making or real patient care.
-- **`exact_match` verification** means the extracted statement was found on a source page. It is **not** proof of clinical correctness, completeness, or regulatory adequacy.
-- **No medical advice** and **no final eligibility decisions**.
-- Demo content uses **synthetic / sample** protocol material (for example `data/sample_clinical_protocol.pdf`). Do not upload real patient-identifying data.
-- Analysis depends on a **local Ollama** install and enough machine resources; quality varies with model and PDF layout.
-- Coordinator/Patient assistants use **keyword-style deterministic** matching; unusual phrasing may be unsupported (measured: 56% of new phrasings handled as intended; unhandled ones fall back to a safe "can't answer").
-- **Long protocols** exceed the model's context window: recall fell to 23% on an 86-page protocol. **Safety sections** are the weakest category. See [`EVALUATION.md`](EVALUATION.md).
-- Always read the full protocol and involve qualified clinicians / the study team for real enrollment questions.
-
----
-
-## 14. Team workflow
+## 15. Team workflow
 
 We use one GitHub repo and personal development branches (see `CONTRIBUTING.md`):
 
@@ -461,6 +485,5 @@ Then open a **Pull Request** on GitHub from your branch toward `main` (or the br
 5. [ ] (Optional) Install Tesseract for scanned PDFs
 6. [ ] `python -m streamlit run app.py`
 7. [ ] Upload `data/sample_clinical_protocol.pdf` → **Analyze protocol**
-8. [ ] Ask coordinator/patient questions; confirm eligibility refusal is safe
-9. [ ] **Patient Guide Review** → Generate → Approve; open **Preview as a patient** and check only approved items appear
-10. [ ] `python -m pytest -q`
+8. [ ] **Review** → Generate → Approve; open **Preview as a patient** and check only approved items appear
+9. [ ] `python -m pytest -q`

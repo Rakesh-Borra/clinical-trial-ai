@@ -57,6 +57,10 @@ class GuideItem(BaseModel):
     # never shown to patients until they are edited and approved.
     rejected: bool = False
 
+    # An edited statement must be rechecked against its protocol excerpt
+    # before it can be approved.
+    verification: Literal["verified", "needs_reverification"] = "verified"
+
 
 class GuideSection(BaseModel):
     """A titled group of guide items."""

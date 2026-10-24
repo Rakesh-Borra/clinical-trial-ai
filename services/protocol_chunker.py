@@ -91,6 +91,11 @@ class ProtocolChunk:
     pages: tuple[ProtocolPage, ...]
     text: str
     sections: tuple[str, ...]
+    # Section categories of the blocks in this chunk (empty when unknown), and
+    # whether every block was classified from its heading (not just content).
+    categories: tuple[str, ...] = ()
+    fully_classified: bool = False
+    has_table: bool = False
 
     @property
     def character_count(self) -> int:

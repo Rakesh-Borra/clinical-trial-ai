@@ -494,9 +494,45 @@ def edit_item(item: GuideItem, new_text: str) -> List[str]:
         item.generated_by = "coordinator"
         item.approved = False
         item.rejected = False
+        item.verification = "needs_reverification"
     item.needs_review = bool(warnings)
     item.review_reasons = warnings
     return warnings
+
+
+def find_added_numbers(original: str, rewritten: str) -> List[str]:
+    """Numbers in the rewrite that the protocol excerpt does not contain."""
+    original_numbers = set(extract_numbers(original))
+    added = []
+    for number in extract_numbers(rewritten):
+        if number not in original_numbers and number not in added:
+            added.append(number)
+    return added
+
+
+def reverify_item(item: GuideItem) -> List[str]:
+    """
+    Recheck an edited statement against its original protocol excerpt.
+
+    Besides the usual safety checks, the edit may not introduce numbers that
+    the excerpt does not contain. Returns the problems; an empty list means the
+    statement is verified (it still needs explicit approval).
+    """
+    problems = check_rewrite(item.original_text, item.plain_text)
+    added = find_added_numbers(item.original_text, item.plain_text)
+    if added:
+        problems.append(
+            "These numbers are not in the protocol excerpt: " + ", ".join(added)
+        )
+    if problems:
+        item.verification = "needs_reverification"
+        item.needs_review = True
+        item.review_reasons = problems
+    else:
+        item.verification = "verified"
+        item.needs_review = False
+        item.review_reasons = []
+    return problems
 
 
 REJECTED_REASON = "Marked not accurate by the coordinator."
@@ -508,6 +544,11 @@ def approve_item(item: GuideItem) -> None:
         raise ValueError(
             "Cannot approve patient content from an incomplete or "
             "unverified protocol analysis."
+        )
+    if item.verification != "verified":
+        raise ValueError(
+            "This edited statement must be reverified against the protocol "
+            "before it can be approved."
         )
     item.approved = True
     if item.rejected:
@@ -555,7 +596,11 @@ def approve_all_unflagged(guide: PatientGuide) -> int:
 
     count = 0
     for item in guide.all_items():
-        if not item.needs_review and not item.approved:
+        if (
+            not item.needs_review
+            and not item.approved
+            and item.verification == "verified"
+        ):
             item.approved = True
             count += 1
     return count
