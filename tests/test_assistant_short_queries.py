@@ -2,6 +2,7 @@
 
 import pytest
 
+from tests.publish_helpers import generate_verified_guide
 from agents.guide_patient_agent import answer_patient_from_guide
 from agents.plain_language_agent import reject_item
 from models.plain_language_models import GuideItem
@@ -24,6 +25,7 @@ def _add(guide, text, page=3, approved=True):
         plain_text=text,
         source_page=page,
         approved=approved,
+        source_status="verified",
     )
     guide.procedures.items.append(item)
     return item

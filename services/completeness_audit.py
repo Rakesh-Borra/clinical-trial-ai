@@ -16,12 +16,21 @@ from typing import Any, Dict, Iterable
 from services.section_classifier import PATIENT_CATEGORIES
 
 # Categories the extraction schema can hold, and how to count them.
+def _info(analysis, *categories):
+    return sum(
+        1 for i in getattr(analysis, "patient_information", []) or []
+        if i.category in categories
+    )
+
+
 _EXTRACTED = {
     "eligibility": lambda a: len(a.inclusion_criteria) + len(a.exclusion_criteria),
     "visits": lambda a: len(a.visits),
-    "procedures": lambda a: len(a.procedures),
-    "safety": lambda a: len(a.safety_information),
-    "risks": lambda a: len(a.safety_information),
+    "procedures": lambda a: len(a.procedures) + _info(a, "blood_collection"),
+    "safety": lambda a: len(a.safety_information) + _info(a, "risks"),
+    "risks": lambda a: len(a.safety_information) + _info(a, "risks"),
+    "consent": lambda a: _info(a, "consent_withdrawal"),
+    "withdrawal": lambda a: _info(a, "consent_withdrawal"),
 }
 _LABELS = {
     "purpose": "study purpose", "eligibility": "eligibility criteria",
@@ -57,6 +66,8 @@ def audit_completeness(blocks: Iterable[Any], analysis: Any) -> Dict[str, Any]:
             status = "ok"
         elif in_source:
             status = "not_extracted"
+        elif category in {"consent", "withdrawal"}:
+            status = "not_found"  # optional in the source; flagged as uncertain below
         else:
             status = "missing"
         entry = {"status": status, "source_pages": pages, "extracted": extracted}

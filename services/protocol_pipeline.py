@@ -2,7 +2,7 @@
 import os
 import time
 
-from services import performance
+from services import benchmark_log, performance
 from services.analysis_progress import report_stage
 from services import analysis_cache
 from services.patient_relevance import filter_protocol_blocks
@@ -75,11 +75,33 @@ def analyze_protocol_pdf(file_path: str):
     services/patient_relevance.py); the result reports what was skipped and
     includes lightweight performance measurements.
     """
-    with performance.track() as tracker:
-        result = _analyze_protocol_pdf(file_path, tracker)
+    label = benchmark_log.label_for(file_path)
+    started = time.perf_counter()
+    try:
+        with performance.track() as tracker:
+            result = _analyze_protocol_pdf(file_path, tracker)
+    except Exception as exc:
+        benchmark_log.record(
+            "analysis", label, success=False,
+            seconds=round(time.perf_counter() - started, 3),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     metrics = tracker.summary()
     metrics.update(result.pop("_chunk_counts", {}))
     result["performance"] = metrics
+    if benchmark_log.enabled():
+        benchmark_log.record(
+            "analysis", label,
+            **{
+                **metrics,
+                "success": bool(result.get("analysis_complete")),
+                "seconds": round(time.perf_counter() - started, 3),
+                "verification_passed": result.get("verification_passed"),
+                "unsupported_statements": result.get("unsupported_statements"),
+                "pages_extracted": (result.get("pages") or {}).get("extracted"),
+            },
+        )
     return result
 
 
@@ -236,9 +258,37 @@ def _analyze_protocol_pdf(file_path: str, tracker: performance.PerfTracker):
             pdf_result,
         )
 
+    # "Ran to completion" and "everything extracted checked out" are different
+    # facts: a failed source check blocks only the affected statements.
+    unsupported = [
+        row for row in verification if row.get("status") != "exact_match"
+    ]
+    analysis.verification_passed = not unsupported
+    pages_with_text = [
+        page["page_number"] for page in pdf_result["pages"]
+        if (page.get("text") or "").strip()
+    ]
     result = {
         "analysis": analysis,
         "analysis_complete": analysis_complete,
+        "execution_complete": analysis_complete,
+        "verification_passed": not unsupported,
+        "unsupported_statements": len(unsupported),
+        "pages": {
+            "total": len(pdf_result["pages"]),
+            "extracted": len(pages_with_text),
+            "analyzed": relevance["analyzed_pages"],
+            "unreadable": [
+                page["page_number"] for page in pdf_result["pages"]
+                if not (page.get("text") or "").strip()
+            ],
+        },
+        # Cited page text lets an edited statement be rechecked against its
+        # source without re-reading the PDF.
+        "source_pages": {
+            str(page["page_number"]): page.get("text") or ""
+            for page in pdf_result["pages"]
+        },
         "verification": verification,
         "extraction_warnings": list(pdf_result.get("warnings") or []),
         "accuracy_warnings": accuracy_warnings,

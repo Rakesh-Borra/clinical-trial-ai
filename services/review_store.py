@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from models.plain_language_models import PatientGuide
+from models.plain_language_models import GuideItem, PatientGuide
 
 PUBLISHED = "published"
 WITHDRAWN = "withdrawn"
@@ -47,6 +47,39 @@ CREATE TABLE IF NOT EXISTS publications (
     status TEXT NOT NULL,
     published_at TEXT,
     withdrawn_at TEXT
+);
+CREATE TABLE IF NOT EXISTS generated_items (
+    protocol_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    item_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (protocol_id, fingerprint, item_id)
+);
+CREATE TABLE IF NOT EXISTS summaries (
+    protocol_id TEXT PRIMARY KEY,
+    original_text TEXT NOT NULL,
+    generated_by TEXT NOT NULL,
+    draft_text TEXT NOT NULL,
+    approved_text TEXT,
+    approved_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS summary_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    protocol_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    action TEXT NOT NULL,
+    before_text TEXT,
+    after_text TEXT,
+    detail TEXT
+);
+CREATE TABLE IF NOT EXISTS coverage_overrides (
+    protocol_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (protocol_id, category)
 );
 CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,6 +161,46 @@ def save_draft(
                 guide.model_dump_json(),
                 _now(),
             ),
+        )
+
+
+def save_generated_item(protocol_id: str, fingerprint: str, item: GuideItem) -> None:
+    """Persist one finished statement the moment it is generated (no decisions)."""
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            """
+            INSERT INTO generated_items (protocol_id, fingerprint, item_id, item_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(protocol_id, fingerprint, item_id) DO UPDATE SET
+                item_json = excluded.item_json, updated_at = excluded.updated_at
+            """,
+            (protocol_id, fingerprint, item.item_id, item.model_dump_json(), _now()),
+        )
+
+
+def load_generated_items(protocol_id: str, fingerprint: str) -> Dict[str, GuideItem]:
+    """Statements generated so far for this analysis, by stable id."""
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT item_id, item_json FROM generated_items "
+            "WHERE protocol_id = ? AND fingerprint = ?",
+            (protocol_id, fingerprint),
+        ).fetchall()
+    out: Dict[str, GuideItem] = {}
+    for row in rows:
+        try:
+            out[row["item_id"]] = GuideItem.model_validate_json(row["item_json"])
+        except ValueError:
+            continue  # an unreadable row is regenerated, not trusted
+    return out
+
+
+def clear_generated_items(protocol_id: str, keep_fingerprint: Optional[str] = None) -> None:
+    """Drop stored generation output (other analyses of the same protocol)."""
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            "DELETE FROM generated_items WHERE protocol_id = ? AND fingerprint != ?",
+            (protocol_id, keep_fingerprint or ""),
         )
 
 
@@ -265,3 +338,156 @@ def history(protocol_id: str, limit: int = 20) -> List[Dict[str, str]]:
             (protocol_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Patient summary: the AI original is never overwritten by coordinator edits
+# ---------------------------------------------------------------------------
+
+def _audit_summary(conn, protocol_id, action, before=None, after=None, detail=""):
+    conn.execute(
+        "INSERT INTO summary_audit (protocol_id, at, action, before_text, "
+        "after_text, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (protocol_id, _now(), action, before, after, detail[:500]),
+    )
+
+
+def load_summary(protocol_id: str) -> Optional[Dict[str, Any]]:
+    """The saved summary record, or None. Approval holds only while unchanged."""
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT * FROM summaries WHERE protocol_id = ?", (protocol_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_original_summary(protocol_id: str, text: str, generated_by: str) -> None:
+    """Store a newly generated AI summary; it also becomes the working draft."""
+    with closing(_connect()) as conn, conn:
+        previous = conn.execute(
+            "SELECT draft_text FROM summaries WHERE protocol_id = ?", (protocol_id,)
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO summaries (protocol_id, original_text, generated_by,
+                                   draft_text, approved_text, approved_at, updated_at)
+            VALUES (?, ?, ?, ?, NULL, NULL, ?)
+            ON CONFLICT(protocol_id) DO UPDATE SET
+                original_text = excluded.original_text,
+                generated_by = excluded.generated_by,
+                draft_text = excluded.draft_text,
+                approved_text = NULL,
+                approved_at = NULL,
+                updated_at = excluded.updated_at
+            """,
+            (protocol_id, text, generated_by, text, _now()),
+        )
+        _audit_summary(
+            conn, protocol_id, "generated",
+            previous["draft_text"] if previous else None, text, generated_by,
+        )
+
+
+def save_summary_draft(protocol_id: str, text: str, actor: str = "coordinator") -> bool:
+    """
+    Save a coordinator edit as the draft; the original is untouched.
+
+    Any earlier approval is withdrawn until the new wording is approved.
+    Returns False when no summary exists or nothing changed.
+    """
+    with closing(_connect()) as conn, conn:
+        row = conn.execute(
+            "SELECT draft_text, approved_text FROM summaries WHERE protocol_id = ?",
+            (protocol_id,),
+        ).fetchone()
+        if row is None or row["draft_text"] == text:
+            return False
+        conn.execute(
+            "UPDATE summaries SET draft_text = ?, approved_text = NULL, "
+            "approved_at = NULL, updated_at = ? WHERE protocol_id = ?",
+            (text, _now(), protocol_id),
+        )
+        _audit_summary(
+            conn, protocol_id, "draft_saved", row["draft_text"], text, actor
+        )
+        if row["approved_text"] is not None:
+            _audit_summary(
+                conn, protocol_id, "approval_invalidated",
+                row["approved_text"], text, "edited after approval",
+            )
+    return True
+
+
+def approve_summary(protocol_id: str, actor: str = "coordinator") -> bool:
+    """Approve exactly the current draft text."""
+    with closing(_connect()) as conn, conn:
+        row = conn.execute(
+            "SELECT draft_text FROM summaries WHERE protocol_id = ?", (protocol_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "UPDATE summaries SET approved_text = draft_text, approved_at = ?, "
+            "updated_at = ? WHERE protocol_id = ?",
+            (_now(), _now(), protocol_id),
+        )
+        _audit_summary(
+            conn, protocol_id, "approved", None, row["draft_text"], actor
+        )
+    return True
+
+
+def withdraw_summary_approval(protocol_id: str) -> None:
+    with closing(_connect()) as conn, conn:
+        cursor = conn.execute(
+            "UPDATE summaries SET approved_text = NULL, approved_at = NULL "
+            "WHERE protocol_id = ? AND approved_text IS NOT NULL",
+            (protocol_id,),
+        )
+        if cursor.rowcount:
+            _audit_summary(conn, protocol_id, "approval_withdrawn")
+
+
+def summary_audit(protocol_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT at, action, before_text, after_text, detail FROM summary_audit "
+            "WHERE protocol_id = ? ORDER BY id DESC LIMIT ?",
+            (protocol_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# "Not applicable" overrides for critical categories
+# ---------------------------------------------------------------------------
+
+def set_coverage_override(protocol_id: str, category: str, reason: str) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            """
+            INSERT INTO coverage_overrides (protocol_id, category, reason, at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(protocol_id, category) DO UPDATE SET
+                reason = excluded.reason, at = excluded.at
+            """,
+            (protocol_id, category, reason, _now()),
+        )
+    log_action(protocol_id, "category_not_applicable", f"{category}: {reason}")
+
+
+def clear_coverage_override(protocol_id: str, category: str) -> None:
+    _run(
+        "DELETE FROM coverage_overrides WHERE protocol_id = ? AND category = ?",
+        (protocol_id, category),
+    )
+    log_action(protocol_id, "category_override_removed", category)
+
+
+def load_coverage_overrides(protocol_id: str) -> Dict[str, Dict[str, str]]:
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT category, reason, at FROM coverage_overrides WHERE protocol_id = ?",
+            (protocol_id,),
+        ).fetchall()
+    return {r["category"]: {"reason": r["reason"], "at": r["at"]} for r in rows}

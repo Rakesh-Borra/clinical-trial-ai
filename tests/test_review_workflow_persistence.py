@@ -10,13 +10,15 @@ from agents.plain_language_agent import (
 )
 from app import publish_block_reason
 from services import review_store
-from services.guide_review import NEEDS_REVERIFICATION, review_state
+from tests.publish_helpers import gk
+from services.guide_review import PENDING, review_state
 from tests.test_patient_guide_ui import (
     APP_PATH,
     _approved_guide,
     _as,
     _click,
     _eight_statement_result,
+    _generated,
     _prepare_review_app,
 )
 
@@ -36,9 +38,9 @@ def _fresh_guide():
 
 
 def _edit_first(at, text):
-    at.text_area(key="guide_0_0_text").set_value(text)
+    at.text_area(key=gk(at, 0, 0, "text")).set_value(text)
     at = at.run()
-    return _click(at, "guide_0_0_save")
+    return _click(at, gk(at, 0, 0, "save"))
 
 
 # --- editing and saving ----------------------------------------------------
@@ -54,10 +56,10 @@ def test_edit_updates_statement_immediately_and_persists():
 
     item = _first(at.session_state["patient_guide"])
     assert item.plain_text == NEW_TEXT
-    assert review_state(item) == NEEDS_REVERIFICATION
+    assert review_state(item) == PENDING
     assert item.source_page == original_page and item.original_text == original_text
     assert any("Edit saved" in w.value for w in list(at.success) + list(at.warning))
-    assert at.text_area(key="guide_0_0_text").value == NEW_TEXT
+    assert at.text_area(key=gk(at, 0, 0, "text")).value == NEW_TEXT
 
     stored = review_store.load_latest_draft()["guide"]
     assert _first(stored).plain_text == NEW_TEXT
@@ -68,23 +70,21 @@ def test_edit_updates_statement_immediately_and_persists():
 
 def test_unsaved_edit_cannot_be_approved():
     at = _prepare_review_app(_eight_statement_result(), _fresh_guide())
-    at.text_area(key="guide_0_0_text").set_value(NEW_TEXT)
+    at.text_area(key=gk(at, 0, 0, "text")).set_value(NEW_TEXT)
     at = at.run()
-    assert at.button(key="guide_0_0_approve").disabled
+    assert at.button(key=gk(at, 0, 0, "approve")).disabled
     assert not _first(at.session_state["patient_guide"]).approved
 
 
-def test_edit_needs_reverification_then_explicit_approval():
+def test_edit_is_rechecked_on_save_then_needs_explicit_approval():
     at = _prepare_review_app(_eight_statement_result(), _fresh_guide())
     at = _edit_first(at, NEW_TEXT)
-    assert at.button(key="guide_0_0_approve").disabled
 
-    at = _click(at, "guide_0_0_reverify")
     item = _first(at.session_state["patient_guide"])
     assert item.verification == "verified" and not item.approved
-    assert not at.button(key="guide_0_0_approve").disabled
+    assert not at.button(key=gk(at, 0, 0, "approve")).disabled
 
-    at = _click(at, "guide_0_0_approve")
+    at = _click(at, gk(at, 0, 0, "approve"))
     assert _first(at.session_state["patient_guide"]).approved
     assert _first(review_store.load_latest_draft()["guide"]).approved
 
@@ -193,13 +193,12 @@ def test_publish_preview_shows_only_approved_statements():
 def test_patient_side_uses_latest_published_version():
     at = _published_app()
     at = _edit_first(at, NEW_TEXT)
-    # Until the edit is reverified, approved and republished, patients keep
+    # Until the edit is approved and republished, patients keep
     # the earlier published wording.
     published = review_store.load_publications()["protocol-eight"]["guide"]
     assert NEW_TEXT not in published.model_dump_json()
 
-    at = _click(at, "guide_0_0_reverify")
-    at = _click(at, "guide_0_0_approve")
+    at = _click(at, gk(at, 0, 0, "approve"))
     at = _click(at, "publish_protocol_btn")
     published = review_store.load_publications()["protocol-eight"]["guide"]
     assert NEW_TEXT in published.model_dump_json()
@@ -221,19 +220,19 @@ def test_review_edits_survive_restart():
     fresh = _as(fresh, "coordinator").run()
     guide = fresh.session_state["patient_guide"]
     assert _first(guide).plain_text == NEW_TEXT
-    assert review_state(_first(guide)) == NEEDS_REVERIFICATION
+    assert review_state(_first(guide)) == PENDING
     assert fresh.session_state["coordinator_protocol_id"] == "protocol-eight"
-    assert fresh.text_area(key="guide_0_0_text").value == NEW_TEXT
+    assert fresh.text_area(key=gk(fresh, 0, 0, "text")).value == NEW_TEXT
 
 
 def test_stale_text_box_is_not_reapplied_after_regeneration():
     at = _prepare_review_app(_eight_statement_result(), _fresh_guide())
-    at.text_area(key="guide_0_0_text").set_value("Old unsaved wording")
+    key = gk(at, 0, 0, "text")
+    at.text_area(key=key).set_value("Old unsaved wording")
     at = at.run()
     at = _click(at, "guide_regenerate_btn")
-    assert "guide_0_0_text" not in at.session_state or (
-        at.session_state["guide_0_0_text"] != "Old unsaved wording"
-    )
+    at = _generated(at)
+    assert key not in at.session_state or at.session_state[key] != "Old unsaved wording"
 
 
 # --- store ----------------------------------------------------------------

@@ -7,6 +7,7 @@ quickly and do not need a model server.
 
 import pytest
 
+from tests.publish_helpers import generate_verified_guide
 from agents.plain_language_agent import (
     DISCLAIMER,
     approve_all_unflagged,
@@ -243,7 +244,7 @@ def test_falls_back_when_model_is_unavailable():
 # ---------------------------------------------------------------------------
 
 def test_generate_full_guide():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
 
     assert guide.trial_title == "Type 2 Diabetes Treatment Study"
     assert guide.protocol_id == "T2D-001"
@@ -257,7 +258,7 @@ def test_generate_full_guide():
 
 
 def test_guide_preserves_numbers_and_source_pages():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
 
     hba1c_item = guide.who_can_join.items[1]
     assert "7.0" in hba1c_item.plain_text
@@ -276,7 +277,7 @@ def test_visit_text_includes_timing_and_procedures():
         seen.append((section, original))
         return original
 
-    generate_patient_guide(sample_analysis(), rewriter=recording_rewriter)
+    generate_verified_guide(sample_analysis(), rewriter=recording_rewriter)
 
     visit_inputs = [text for section, text in seen if section == "visits"]
     assert visit_inputs == [
@@ -285,7 +286,7 @@ def test_visit_text_includes_timing_and_procedures():
 
 
 def test_glossary_collects_terms_without_duplicates():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
     names = [t.term for t in guide.glossary]
 
     for expected in ["hba1c", "screening", "egfr", "ecg", "vital signs", "adverse event"]:
@@ -294,7 +295,7 @@ def test_glossary_collects_terms_without_duplicates():
 
 
 def test_empty_sections_say_information_is_unavailable():
-    guide = generate_patient_guide(
+    guide = generate_verified_guide(
         ProtocolAnalysis(trial_title="Empty Study"),
         rewriter=echo_rewriter,
     )
@@ -305,7 +306,7 @@ def test_empty_sections_say_information_is_unavailable():
 
 
 def test_eligibility_sections_never_decide_for_the_patient():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
 
     assert "Only the study team can decide" in guide.who_can_join.introduction
     assert "does not decide whether you can join" in guide.disclaimer
@@ -319,7 +320,7 @@ def test_flagged_items_are_reported_for_review():
     def drop_numbers(original, section, feedback=None):
         return "Some simple words."
 
-    guide = generate_patient_guide(sample_analysis(), rewriter=drop_numbers)
+    guide = generate_verified_guide(sample_analysis(), rewriter=drop_numbers)
     flagged = guide.flagged_items()
 
     # Every item except the two without numbers should be flagged
@@ -330,7 +331,7 @@ def test_flagged_items_are_reported_for_review():
 
 
 def test_markdown_output():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
     markdown = guide_to_markdown(guide)
 
     assert markdown.startswith("# Type 2 Diabetes Treatment Study")
@@ -346,7 +347,7 @@ def test_markdown_output():
 # ---------------------------------------------------------------------------
 
 def test_new_guide_starts_unapproved():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
 
     assert guide.approved_count() == 0
     assert guide.is_fully_approved() is False
@@ -356,25 +357,33 @@ def test_completeness_propagates_and_legacy_analyses_remain_complete():
     legacy_analysis = sample_analysis()
     assert legacy_analysis.analysis_complete is None
 
-    guide = generate_patient_guide(legacy_analysis, rewriter=echo_rewriter)
+    guide = generate_verified_guide(legacy_analysis, rewriter=echo_rewriter)
     assert guide.analysis_complete is True
     assert all(item.analysis_complete is True for item in guide.all_items())
 
 
-def test_incomplete_analysis_blocks_individual_and_bulk_approval():
+def test_incomplete_analysis_blocks_publication_not_verified_approval():
     analysis = sample_analysis()
     analysis.analysis_complete = False
-    guide = generate_patient_guide(analysis, rewriter=echo_rewriter)
+    guide = generate_verified_guide(analysis, rewriter=echo_rewriter)
     item = guide.who_can_join.items[0]
 
     assert guide.analysis_complete is False
     assert all(candidate.analysis_complete is False for candidate in guide.all_items())
-    with pytest.raises(ValueError, match="incomplete or unverified"):
-        approve_item(item)
-    with pytest.raises(ValueError, match="incomplete or unverified"):
-        approve_all_unflagged(guide)
+    # A verified statement can be approved on its own merits.
+    approve_item(item)
+    assert item.approved is True
+    assert guide.is_fully_approved() is False
 
-    item.approved = True
+    # An unverified statement cannot, whatever the coordinator clicks.
+    other = guide.who_can_join.items[1]
+    other.source_status = "unverified"
+    other.source_issue = "not found on the cited page"
+    with pytest.raises(ValueError, match="verification warnings"):
+        approve_item(other)
+    approve_all_unflagged(guide)
+    assert other.approved is False
+
     unapprove_item(item)
     assert item.approved is False
 
@@ -383,7 +392,7 @@ def test_unknown_analysis_completeness_fails_closed_for_publication():
     analysis = sample_analysis().model_copy(
         update={"analysis_complete": None}
     )
-    guide = generate_patient_guide(analysis, rewriter=echo_rewriter)
+    guide = generate_verified_guide(analysis, rewriter=echo_rewriter)
     guide.who_can_join.items[0].approved = True
 
     assert guide.analysis_complete is None
@@ -397,7 +406,7 @@ def test_unknown_analysis_completeness_fails_closed_for_publication():
 
 
 def test_patient_view_hides_unapproved_items():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
     approve_item(guide.who_can_join.items[0])
 
     patient_view = guide_to_markdown(guide, approved_only=True)
@@ -413,7 +422,7 @@ def test_approve_all_unflagged_skips_flagged_items():
     def drop_numbers(original, section, feedback=None):
         return "Some simple words."
 
-    guide = generate_patient_guide(sample_analysis(), rewriter=drop_numbers)
+    guide = generate_verified_guide(sample_analysis(), rewriter=drop_numbers)
     newly_approved = approve_all_unflagged(guide)
 
     assert newly_approved == 2  # the two items that contain no numbers
@@ -422,7 +431,7 @@ def test_approve_all_unflagged_skips_flagged_items():
 
 
 def test_fully_approved_guide():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
     approve_all_unflagged(guide)
 
     assert guide.is_fully_approved() is True
@@ -430,7 +439,7 @@ def test_fully_approved_guide():
 
 
 def test_coordinator_edit_is_checked_and_needs_reapproval():
-    guide = generate_patient_guide(sample_analysis(), rewriter=echo_rewriter)
+    guide = generate_verified_guide(sample_analysis(), rewriter=echo_rewriter)
     item = guide.who_can_join.items[0]
     approve_item(item)
 
@@ -467,7 +476,7 @@ def test_empty_edit_is_rejected():
 
 def test_progress_callback_called_for_every_item():
     finished = []
-    generate_patient_guide(
+    generate_verified_guide(
         sample_analysis(),
         rewriter=echo_rewriter,
         on_item=finished.append,

@@ -9,6 +9,7 @@ from streamlit.testing.v1 import AppTest
 from agents.guide_patient_agent import answer_patient_from_guide
 from agents.plain_language_agent import approve_item, edit_item, reject_item, reverify_item
 from services import guide_jobs
+from tests.publish_helpers import gk
 from services.guide_review import (
     WITHHELD_MESSAGE,
     build_published_snapshot,
@@ -162,6 +163,16 @@ def _mixed_guide():
     return result, guide
 
 
+def _with_second_visit(guide):
+    """Rejecting the only visit would leave the schedule uncovered; add another."""
+    extra = guide.visits.items[0].model_copy(deep=True)
+    extra.original_text = "Final Visit: Week 8"
+    extra.plain_text = "Your last visit is in week 8."
+    extra.approved, extra.rejected = True, False
+    guide.visits.items.append(extra)
+    return guide
+
+
 def test_review_states():
     _, guide = _mixed_guide()
     assert review_state(_item(guide, "Follow-up")) == "rejected"
@@ -170,14 +181,21 @@ def test_review_states():
     _item(guide, "between 18 and 65").approved = False
     assert review_state(_item(guide, "between 18 and 65")) == "pending"
     assert state_counts(guide) == {
-        "all": 8, "pending": 1, "needs_reverification": 0,
+        "all": 8, "pending": 1, "edited_total": 1,
         "approved": 5, "edited": 1, "rejected": 1,
     }
 
 
-def test_mix_of_approved_edited_and_rejected_publishes_without_the_rejected():
+def test_mix_of_approved_edited_and_rejected_publishes_without_the_rejected(monkeypatch):
     result, guide = _mixed_guide()
-    assert publish_block_reason(guide, result) is None
+    _with_second_visit(guide)
+    import streamlit as st
+    from tests.publish_helpers import make_publishable
+
+    make_publishable("protocol-eight")
+    with monkeypatch.context() as m:
+        m.setattr(st, "session_state", {"coordinator_protocol_id": "protocol-eight"})
+        assert publish_block_reason(guide, result) is None
     at = _prepare_review_app(result, guide)
     assert not at.button(key="publish_protocol_btn").disabled
     at = _click(at, "publish_protocol_btn")
@@ -185,9 +203,9 @@ def test_mix_of_approved_edited_and_rejected_publishes_without_the_rejected():
     dump = snapshot.model_dump_json()
     assert "Follow-up" not in dump and "Day 30" not in dump
     assert "inclusion condition 2 in full" in dump
-    assert len(snapshot.all_items()) == 7
+    assert len(snapshot.all_items()) == 8
     # The coordinator's own copy keeps the rejected statement for audit.
-    assert len(at.session_state["patient_guide"].all_items()) == 8
+    assert len(at.session_state["patient_guide"].all_items()) == 9
     assert _item(at.session_state["patient_guide"], "Follow-up").rejected
 
 
@@ -213,7 +231,7 @@ def test_every_statement_rejected_blocks_publication():
     "marker,section",
     [("exclusion condition", "Who may not be able to join"), ("safety", "Safety information")],
 )
-def test_missing_mandatory_safety_section_blocks_publication(marker, section):
+def test_missing_mandatory_safety_section_blocks_publication(marker, section, publish_context):
     result = _eight_statement_result()
     guide = _approved_guide(result)
     target = guide.who_cannot_join if "exclusion" in marker else guide.safety
@@ -235,11 +253,11 @@ def test_edited_statement_must_pass_verification_before_approval_or_publication(
     warnings = edit_item(item, "Participants must meet the second condition.")
     assert warnings
     at = _prepare_review_app(result, guide)
-    assert at.button(key="guide_0_1_approve").disabled
+    assert at.button(key=gk(at, 0, 1, "approve")).disabled
     assert at.button(key="publish_protocol_btn").disabled
     # Even if approval were forced, publication still refuses it.
     item.approved = True
-    assert "failed verification" in decision_block_reason(guide)
+    assert "decision" in decision_block_reason(guide)
 
 
 def test_statement_that_points_at_a_rejected_neighbour_blocks_publication():
@@ -254,26 +272,26 @@ def test_statement_that_points_at_a_rejected_neighbour_blocks_publication():
 
 def test_changing_a_decision_updates_publishability():
     result = _eight_statement_result()
-    guide = _approved_guide(result)
+    guide = _with_second_visit(_approved_guide(result))
     at = _prepare_review_app(result, guide)
     assert not at.button(key="publish_protocol_btn").disabled
-    at = _click(at, "guide_2_0_reject")  # visits statement
+    at = _click(at, gk(at, 2, 0, "reject"))  # visits statement
     assert not at.button(key="publish_protocol_btn").disabled
-    at = _click(at, "guide_2_0_reconsider")
+    at = _click(at, gk(at, 2, 0, "reconsider"))
     assert at.button(key="publish_protocol_btn").disabled
     assert any("need a coordinator decision" in w.value for w in at.warning)
-    at = _click(at, "guide_2_0_approve")
+    at = _click(at, gk(at, 2, 0, "approve"))
     assert not at.button(key="publish_protocol_btn").disabled
 
 
 def test_republishing_after_rejecting_more_removes_it_from_patients():
     result = _eight_statement_result()
-    guide = _approved_guide(result)
+    guide = _with_second_visit(_approved_guide(result))
     at = _click(_prepare_review_app(result, guide), "publish_protocol_btn")
     assert "Day 30" in at.session_state["published_protocols"]["protocol-eight"][
         "guide"
     ].model_dump_json()
-    at = _click(at, "guide_2_0_reject")
+    at = _click(at, gk(at, 2, 0, "reject"))
     assert any("earlier version" in i.value for i in at.info)
     at = _click(at, "publish_protocol_btn")
     assert "Day 30" not in at.session_state["published_protocols"]["protocol-eight"][
@@ -379,7 +397,6 @@ def test_filters_replace_the_checkbox_and_show_counts():
     assert labels == {
         "guide_filter_all": "All Statements (8)",
         "guide_filter_pending": "Pending (1)",
-        "guide_filter_needs_reverification": "Needs Reverification (0)",
         "guide_filter_approved": "Approved (5)",
         "guide_filter_edited": "Edited (1)",
         "guide_filter_rejected": "Rejected (1)",
@@ -397,7 +414,7 @@ def test_each_filter_shows_only_its_statements(key, expected):
     at = _click(_prepare_review_app(result, guide), f"guide_filter_{key}")
     assert len(_cards(at)) == expected
     assert at.button(key=f"guide_filter_{key}").proto.type == "primary"
-    others = [k for k in ("all", "pending", "needs_reverification", "approved", "edited", "rejected") if k != key]
+    others = [k for k in ("all", "pending", "approved", "edited", "rejected") if k != key]
     assert all(at.button(key=f"guide_filter_{o}").proto.type == "secondary" for o in others)
 
 
@@ -406,11 +423,11 @@ def test_counts_update_immediately_and_rejected_stay_visible_for_audit():
     guide = _approved_guide(result)
     at = _prepare_review_app(result, guide)
     assert at.button(key="guide_filter_rejected").label == "Rejected (0)"
-    at = _click(at, "guide_2_0_reject")
+    at = _click(at, gk(at, 2, 0, "reject"))
     assert at.button(key="guide_filter_rejected").label == "Rejected (1)"
     assert at.button(key="guide_filter_approved").label == "Approved (7)"
     at = _click(at, "guide_filter_rejected")
-    assert _cards(at) == ["guide_2_0_save"]
+    assert _cards(at) == [gk(at, 2, 0, "save")]
     assert any("Follow-up" in str(h.value) for h in at.get("html"))
 
 
@@ -419,7 +436,7 @@ def test_switching_filters_keeps_edits_and_decisions():
     guide = _approved_guide(result)
     guide.all_items()[1].approved = False
     at = _prepare_review_app(result, guide)
-    at = _click(at, "guide_2_0_reject")
+    at = _click(at, gk(at, 2, 0, "reject"))
     for key in ("pending", "rejected", "approved", "all"):
         at = _click(at, f"guide_filter_{key}")
     saved = at.session_state["patient_guide"]

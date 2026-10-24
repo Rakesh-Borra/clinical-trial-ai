@@ -2,6 +2,7 @@
 
 import pytest
 
+from tests.publish_helpers import generate_verified_guide
 from agents.guide_patient_agent import answer_patient_from_guide
 from agents.plain_language_agent import approve_item, generate_patient_guide
 from models.protocol_models import (
@@ -27,7 +28,7 @@ def _guide(approve=True):
         procedures=[TrialProcedure(name="Blood pressure measurement", source_page=3)],
         analysis_complete=True,
     )
-    guide = generate_patient_guide(analysis, rewriter=_rewriter)
+    guide = generate_verified_guide(analysis, rewriter=_rewriter)
     if approve:
         for item in guide.all_items():
             approve_item(item)

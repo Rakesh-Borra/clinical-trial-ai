@@ -23,3 +23,6 @@ data/protocols/*
 data/outputs/*
 !data/protocols/.gitkeep
 !data/outputs/.gitkeep
+# Optional benchmark timing logs (CTAI_BENCHMARK_LOG)
+*.benchmark.jsonl
+benchmark_logs/

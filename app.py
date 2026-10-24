@@ -25,6 +25,7 @@ from models.protocol_models import ProtocolAnalysis
 from services import analysis_jobs, review_store
 from services.model_provider import provider_display_name
 from services.protocol_pipeline import analyze_protocol_pdf
+from services import benchmark_log
 from ui import theme
 from ui.landing import (
     COORDINATOR,
@@ -38,7 +39,14 @@ from ui.landing import (
     render_landing,
     render_top_bar,
 )
+from services.coverage import build_coverage, coverage_block_reason
 from services.guide_review import build_published_snapshot, decision_block_reason
+from services.summary_review import is_summary_approved, summary_publish_block_reason
+from ui.summary_panel import (
+    render_coverage_panel,
+    render_summary_generation,
+    render_summary_panel,
+)
 from agents.plain_language_agent import guide_to_markdown
 from ui.patient_guide_tab import (
     GUIDE_KEY,
@@ -208,6 +216,9 @@ def start_analysis() -> None:
     if st.session_state.get("pipeline_result") is not None or active_analysis_job():
         return
     st.session_state["analysis_error"] = None
+    benchmark_log.name_file(
+        st.session_state.temp_pdf_path, st.session_state.get("uploaded_name") or ""
+    )
     st.session_state["analysis_job_id"] = analysis_jobs.jobs.submit(
         run_protocol_analysis,
         st.session_state.temp_pdf_path,
@@ -761,7 +772,25 @@ def publish_block_reason(
     if reason:
         return reason
 
-    if not is_fully_approved_snapshot(build_published_snapshot(guide)):
+    snapshot = build_published_snapshot(guide)
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if not protocol_id:
+        # Coverage overrides and the approved summary are stored per protocol.
+        return "Cannot publish: the protocol has no active identifier. Upload it again."
+    try:
+        reason = coverage_block_reason(
+            build_coverage(pipeline_result, snapshot),
+            review_store.load_coverage_overrides(protocol_id),
+            pipeline_result.get("analysis_complete") is True,
+        ) or summary_publish_block_reason(
+            review_store.load_summary(protocol_id), snapshot
+        )
+    except sqlite3.Error as exc:
+        return f"Cannot publish: review data could not be read ({exc})."
+    if reason:
+        return reason
+
+    if not is_fully_approved_snapshot(snapshot):
         return "The patient guide did not pass final approval validation."
     return None
 
@@ -800,9 +829,24 @@ def _guide_content(guide: Any) -> Optional[dict]:
     return content
 
 
+def _approved_summary_text() -> Optional[str]:
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if not protocol_id:
+        return None
+    try:
+        record = review_store.load_summary(protocol_id)
+    except sqlite3.Error:
+        return None
+    return record["approved_text"] if is_summary_approved(record) else None
+
+
 def _publishable(guide: Any) -> Any:
     """What publishing this guide would save (rejected statements removed)."""
-    return build_published_snapshot(guide) if isinstance(guide, PatientGuide) else None
+    if not isinstance(guide, PatientGuide):
+        return None
+    snapshot = build_published_snapshot(guide)
+    snapshot.summary = _approved_summary_text()
+    return snapshot
 
 
 def published_matches_current(
@@ -844,7 +888,7 @@ def publish_current_protocol() -> tuple[bool, str]:
             "Another published protocol already uses this name. Choose a "
             "different protocol name in Step 1B."
         )
-    snapshot = build_published_snapshot(guide)
+    snapshot = _publishable(guide)
     snapshot.trial_title = protocol_name
     snapshot.protocol_id = None
     try:
@@ -1176,6 +1220,9 @@ def render_summary_step() -> None:
                  *audit.get("uncertain", []), *audit.get("notes", [])]
         st.caption("Worth double-checking against the protocol: " + "; ".join(items) + ".")
     render_protocol_summary(result)
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if protocol_id:
+        render_summary_generation(result, protocol_id)
     if st.button("Continue to review statements", type="primary", key="continue_review_btn"):
         _go_to(STEPS[2])
 
@@ -1187,23 +1234,22 @@ def render_review_step() -> None:
     protocol_name = current_protocol_name()
     if protocol_name:
         st.caption(f"Protocol: **{protocol_name}**")
-    render_guide_review_tab(st.session_state.pipeline_result)
-    if get_guide() is None:
+    publish_col = render_guide_review_tab(st.session_state.pipeline_result)
+    if publish_col is None or get_guide() is None:
         # Statements are still being generated (or failed): nothing to publish yet.
         return
 
-    st.divider()
-    st.subheader("Publish to the patient portal")
-
     protocol_id = st.session_state.get("coordinator_protocol_id")
+    if protocol_id:
+        st.divider()
+        render_coverage_panel(st.session_state.pipeline_result, get_guide(), protocol_id)
+        render_summary_panel(get_guide(), protocol_id)
+
     guide = get_guide()
     publish_reason = (
         "Save a protocol name in Step 1B before publishing."
         if not protocol_name
-        else publish_block_reason(
-            guide,
-            st.session_state.get("pipeline_result"),
-        )
+        else publish_block_reason(guide, st.session_state.get("pipeline_result"))
     )
 
     restored = st.session_state.pop("_draft_restored", None)
@@ -1211,17 +1257,23 @@ def render_review_step() -> None:
         st.info(f"Restored your saved review for **{restored}**.")
 
     record = published_record(protocol_id)
-    status = "Not published"
-    if record is not None:
-        status = (
-            "Published"
-            if published_matches_current(record, guide, protocol_name)
-            else "Published (earlier version; newer changes not published)"
+    # The Publish button sits in the sticky status bar; its messages follow here.
+    with publish_col:
+        publish_clicked = st.button(
+            "Publish to Patient Portal",
+            type="primary",
+            key="publish_protocol_btn",
+            disabled=publish_reason is not None,
+            help=publish_reason,
+            use_container_width=True,
         )
-    elif review_store.publication_status(protocol_id) == review_store.WITHDRAWN:
-        status = "Unpublished (withdrawn from patients)"
-    st.caption(f"Publication status: **{status}**")
+    # Only this run's attempt is reported; nothing is carried over between runs.
+    attempt = publish_current_protocol() if publish_clicked else None
+    if attempt is not None and attempt[0]:
+        record = published_record(protocol_id)
+    _render_publish_status(guide, protocol_id, protocol_name, publish_reason, record, attempt)
 
+    st.divider()
     with st.expander("Preview what patients will see", expanded=False):
         preview = build_published_snapshot(guide)
         if preview.all_items():
@@ -1233,16 +1285,42 @@ def render_review_step() -> None:
         else:
             st.caption("Nothing is approved yet, so patients would see nothing.")
 
-    publish_clicked = st.button(
-        "Publish to Patient Portal",
-        type="primary",
-        key="publish_protocol_btn",
-        disabled=publish_reason is not None,
-    )
-    # Only this run's attempt is reported; nothing is carried over between runs.
-    attempt = publish_current_protocol() if publish_clicked else None
-    if attempt is not None and attempt[0]:
-        record = published_record(protocol_id)
+    try:
+        events = review_store.history(protocol_id, limit=10)
+    except (sqlite3.Error, OSError):
+        events = []
+    if events:
+        with st.expander("Recent review history", expanded=False):
+            for event in events:
+                st.caption(f"{event['at']} · {event['action']} · {event['detail'] or ''}")
+
+    # Last element of the page, and only for a protocol that is really published.
+    if record is not None and st.button(
+        "Preview as a patient", key="preview_patient_btn"
+    ):
+        navigate_to_page(patient_page(protocol_id))
+        st.rerun()
+
+
+def _render_publish_status(
+    guide: Any,
+    protocol_id: Optional[str],
+    protocol_name: str,
+    publish_reason: Optional[str],
+    record: Optional[Mapping[str, Any]],
+    attempt: Optional[tuple],
+) -> None:
+    """Publication status, blockers, and Unpublish (below the sticky bar)."""
+    status = "Not published"
+    if record is not None:
+        status = (
+            "Published"
+            if published_matches_current(record, guide, protocol_name)
+            else "Published (earlier version; newer changes not published)"
+        )
+    elif review_store.publication_status(protocol_id) == review_store.WITHDRAWN:
+        status = "Unpublished (withdrawn from patients)"
+    st.caption(f"Publication status: **{status}**")
 
     if attempt is not None and not attempt[0]:
         st.error(attempt[1])
@@ -1267,22 +1345,6 @@ def render_review_step() -> None:
         st.rerun()
     if unpublished_note:
         (st.success if unpublished_note[0] else st.error)(unpublished_note[1])
-
-    try:
-        events = review_store.history(protocol_id, limit=10)
-    except (sqlite3.Error, OSError):
-        events = []
-    if events:
-        with st.expander("Recent review history", expanded=False):
-            for event in events:
-                st.caption(f"{event['at']} · {event['action']} · {event['detail'] or ''}")
-
-    # Last element of the page, and only for a protocol that is really published.
-    if record is not None and st.button(
-        "Preview as a patient", key="preview_patient_btn"
-    ):
-        navigate_to_page(patient_page(protocol_id))
-        st.rerun()
 
 
 def render_coordinator_workspace() -> None:

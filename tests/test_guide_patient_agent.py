@@ -6,6 +6,7 @@ was approved, the Patient Assistant still showed the unapproved "Type 2
 diabetes" requirement because it read the full protocol analysis.
 """
 
+from tests.publish_helpers import generate_verified_guide
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,7 +56,7 @@ def _analysis():
 
 
 def _guide():
-    return generate_patient_guide(_analysis(), rewriter=_fake_rewriter)
+    return generate_verified_guide(_analysis(), rewriter=_fake_rewriter)
 
 
 def _approve_age_only(guide):
@@ -271,7 +272,7 @@ def _mixed_analysis():
 
 
 def _mixed_guide():
-    return generate_patient_guide(_mixed_analysis(), rewriter=_fake_rewriter)
+    return generate_verified_guide(_mixed_analysis(), rewriter=_fake_rewriter)
 
 
 def test_specific_question_with_no_item_match_does_not_dump_section():
@@ -369,7 +370,7 @@ def _numeric_range_analysis():
 
 def test_age_question_ignores_bmi_dosage_and_duration_ranges():
     """Age matching must require age language, not bare between-N-and-M ranges."""
-    guide = generate_patient_guide(
+    guide = generate_verified_guide(
         _numeric_range_analysis(),
         rewriter=_fake_rewriter,
     )
@@ -394,7 +395,7 @@ def test_age_question_ignores_bmi_dosage_and_duration_ranges():
 
 
 def test_age_question_with_mixed_approval_still_hides_non_age_ranges():
-    guide = generate_patient_guide(
+    guide = generate_verified_guide(
         _numeric_range_analysis(),
         rewriter=_fake_rewriter,
     )

@@ -77,6 +77,14 @@ def test_missing_items_lower_recall():
     assert result["recall"] == 7 / 8
 
 
+def _stand_in_root(tmp_path):
+    """A temp project root holding an empty PDF placeholder (the pipeline is mocked)."""
+    root = tmp_path / "root"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "sample_clinical_protocol.pdf").write_bytes(b"%PDF-1.4")
+    return root
+
+
 def test_extraction_eval_end_to_end_with_mocked_pipeline(tmp_path):
     pipeline_result = {
         "analysis": _perfect_analysis(),
@@ -84,6 +92,8 @@ def test_extraction_eval_end_to_end_with_mocked_pipeline(tmp_path):
         "accuracy_warnings": [],
     }
     with patch.object(run_extraction_eval, "RESULTS", tmp_path), patch.object(
+        run_extraction_eval, "ROOT", _stand_in_root(tmp_path)
+    ), patch.object(
         run_extraction_eval, "run_pipeline", return_value=pipeline_result
     ):
         result = run_extraction_eval.evaluate_one(
@@ -120,6 +130,8 @@ def test_extraction_is_saved_before_guide_and_guide_can_be_added_later(tmp_path)
     truth = GROUND_TRUTH / "sample_clinical_protocol.json"
 
     with patch.object(run_extraction_eval, "RESULTS", tmp_path), patch.object(
+        run_extraction_eval, "ROOT", _stand_in_root(tmp_path)
+    ), patch.object(
         run_extraction_eval, "run_pipeline", return_value=pipeline_result
     ), patch.object(run_extraction_eval, "guide_stats", side_effect=KeyboardInterrupt):
         try:

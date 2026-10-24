@@ -16,6 +16,9 @@ SectionName = Literal[
     "visits",
     "procedures",
     "safety_information",
+    "study_interventions",
+    "consent_withdrawal",
+    "study_purpose",
 ]
 
 
@@ -32,6 +35,15 @@ class PlainLanguageRewrite(BaseModel):
     plain_text: str
 
 
+def page_label(item) -> str:
+    """"page 5" or "pages 5, 9, 13" for every page that states the item."""
+    pages = [item.source_page] if item.source_page else []
+    pages += [p for p in getattr(item, "source_pages", []) if p not in pages]
+    if not pages:
+        return ""
+    return ("pages " if len(pages) > 1 else "page ") + ", ".join(str(p) for p in pages)
+
+
 class GuideItem(BaseModel):
     """One protocol statement rewritten for patients."""
 
@@ -39,6 +51,8 @@ class GuideItem(BaseModel):
     original_text: str
     plain_text: str
     source_page: Optional[int] = None
+    # Other protocol pages that state the same thing.
+    source_pages: List[int] = Field(default_factory=list)
     terms_explained: List[GlossaryTerm] = Field(default_factory=list)
 
     # How the plain text was produced:
@@ -60,6 +74,36 @@ class GuideItem(BaseModel):
     # An edited statement must be rechecked against its protocol excerpt
     # before it can be approved.
     verification: Literal["verified", "needs_reverification"] = "verified"
+
+    # Result of checking the underlying protocol fact against its source page
+    # (separate from the coordinator-edit check above). "unchecked" is the
+    # default, so records saved before source checks existed (or never
+    # checked) need a fresh check before approval or publication.
+    source_status: Literal["verified", "unverified", "unchecked"] = "unchecked"
+    source_issue: Optional[str] = None
+    # Unsupported wording replaced by a source-verified coordinator edit.
+    superseded_text: Optional[str] = None
+
+    # Stable identity (does not depend on list position). Records saved
+    # before it existed get one when loaded.
+    item_id: str = ""
+    # True only when the model could not produce a rewrite at all (not when
+    # a rewrite failed the safety checks); such statements can be retried.
+    generation_failed: bool = False
+
+    # Coordinator decision recorded apart from the AI verification result:
+    # approving over a verification warning is a human override with the
+    # warnings that were acknowledged and the coordinator's reason.
+    override: bool = False
+    override_reason: Optional[str] = None
+    override_warnings: List[str] = Field(default_factory=list)
+    override_at: Optional[str] = None
+
+
+_NOT_IN_DOCUMENT = (
+    "The trial document did not include this information. "
+    "Please ask the study team."
+)
 
 
 class GuideSection(BaseModel):
@@ -83,9 +127,43 @@ class PatientGuide(BaseModel):
     visits: GuideSection
     procedures: GuideSection
     safety: GuideSection
+    # Added later; stored guides without them load with empty sections.
+    interventions: GuideSection = Field(
+        default_factory=lambda: GuideSection(
+            title="Study treatment",
+            introduction="This is the study treatment and how it is taken.",
+            unavailable_message=_NOT_IN_DOCUMENT,
+        )
+    )
+    purpose: GuideSection = Field(
+        default_factory=lambda: GuideSection(
+            title="About the study",
+            introduction="This is what the study is about.",
+            unavailable_message=_NOT_IN_DOCUMENT,
+        )
+    )
+    consent: GuideSection = Field(
+        default_factory=lambda: GuideSection(
+            title="Your rights, consent and withdrawal",
+            introduction=(
+                "Taking part is your choice. This is how consent, privacy "
+                "and leaving the study work."
+            ),
+            unavailable_message=_NOT_IN_DOCUMENT,
+        )
+    )
+
+    # Progressive generation. Guides saved before it existed are complete.
+    generation_total: Optional[int] = None
+    generation_complete: bool = True
+
+    # Ids of the human overrides the coordinator confirmed for publication.
+    overrides_confirmed: List[str] = Field(default_factory=list)
 
     glossary: List[GlossaryTerm] = Field(default_factory=list)
     disclaimer: str
+    # Only ever the coordinator-approved summary text, set when publishing.
+    summary: Optional[str] = None
 
     def sections(self) -> List[GuideSection]:
         return [
@@ -93,7 +171,10 @@ class PatientGuide(BaseModel):
             self.who_cannot_join,
             self.visits,
             self.procedures,
+            self.interventions,
             self.safety,
+            self.consent,
+            self.purpose,  # last: existing positions of the other sections stay put
         ]
 
     def all_items(self) -> List[GuideItem]:

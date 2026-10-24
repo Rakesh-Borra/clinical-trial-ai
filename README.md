@@ -287,7 +287,7 @@ If the terminal prints a different Local URL, use that URL instead.
 
 1. Open the Streamlit app. You land on the **Welcome to Clinical Trial AI** page.
 2. Choose **Sign in as coordinator** (demo sign-in: no password).
-3. **Step 1 · Upload**: upload **`data/sample_clinical_protocol.pdf`**, pick the document type, click **Analyze protocol**. **Analysis can take several minutes** with local `qwen3:4b`; a completed analysis of the same text and settings is reused from the SQLite cache.
+3. **Step 1 · Upload**: upload any protocol PDF you choose (none is bundled), pick the document type, click **Analyze protocol**. **Analysis can take several minutes** with local `qwen3:4b`; a completed analysis of the same text and settings is reused from the SQLite cache.
 4. Walk through the three steps:
 
 | Step | What to look for |
@@ -336,7 +336,7 @@ python -m evaluation.run_safety_eval                 # no Ollama needed, ~1 s
 python -m evaluation.run_extraction_eval --cached    # re-score saved runs, no Ollama
 ```
 
-Re-running the models on the real protocols needs the PDFs in `data/protocols/`; see [`evaluation/README.md`](evaluation/README.md).
+Re-running the models on the real protocols needs the protocol PDFs stored outside the repo (paths are set in the ground-truth JSON); see [`evaluation/README.md`](evaluation/README.md).
 
 ---
 
@@ -352,7 +352,7 @@ Re-running the models on the real protocols needs the PDFs in `data/protocols/`;
 | **Port 8501 already in use** | Stop the other Streamlit process, or run `python -m streamlit run app.py --server.port 8502` and open that port. |
 | **Analysis is very slow** | Expected for local `qwen3:4b` on CPU. Wait for completion; do not re-click Analyze repeatedly. Q&A after caching is fast. |
 | **Windows activation errors** | Use `.\.venv\Scripts\Activate.ps1`. Adjust PowerShell execution policy for **CurrentUser** if scripts are blocked. |
-| **Empty / unreadable PDF** | The UI should show a clear error. Try `data/sample_clinical_protocol.pdf` first. |
+| **Empty / unreadable PDF** | The UI should show a clear error. Try a different text-based protocol PDF. |
 | **Import errors when running scripts** | Run Streamlit and pytest from the **repo root** with the venv active. For ad-hoc scripts, you may need `PYTHONPATH=.` (macOS/Linux) or equivalent. |
 
 ---
@@ -392,7 +392,7 @@ clinical-trial-ai/
 ├── ui/                             # theme, landing/sign-in, patient view, review tab, chat store
 ├── evaluation/                     # Answer keys, question bank, scoring, results
 ├── tests/                          # pytest suite
-├── data/                           # sample_clinical_protocol.pdf; ctai.db is created locally (git-ignored)
+├── data/                           # ctai.db is created locally (git-ignored)
 ├── docs/PROJECT_BRIEF.md, EVALUATION.md, ARCHITECTURE.md, CONTRIBUTING.md, TASKS.md
 └── scripts/                        # Optional manual smoke scripts (may call Ollama)
 ```
@@ -484,6 +484,16 @@ Then open a **Pull Request** on GitHub from your branch toward `main` (or the br
 4. [ ] Install/start Ollama and `ollama pull qwen3:4b`
 5. [ ] (Optional) Install Tesseract for scanned PDFs
 6. [ ] `python -m streamlit run app.py`
-7. [ ] Upload `data/sample_clinical_protocol.pdf` → **Analyze protocol**
+7. [ ] Upload a protocol PDF → **Analyze protocol**
 8. [ ] **Review** → Generate → Approve; open **Preview as a patient** and check only approved items appear
 9. [ ] `python -m pytest -q`
+
+## Opt-in benchmarking
+
+No benchmark PDFs are bundled. Keep them outside the repo.
+
+- Ollama-free preview (extraction, relevance filter, chunk and call estimates):
+  `PYTHONPATH=. python scripts/benchmark_preview.py "<pdf folder>" out.json`
+- Timing log while using the normal UI: set `CTAI_BENCHMARK_LOG=<path>.benchmark.jsonl` before
+  starting the app (unset = no logging, no behavior change). Summarize with
+  `python -m services.benchmark_log <path>`.

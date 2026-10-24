@@ -71,8 +71,9 @@ def test_analyze_protocol_extracts_visit_timings():
         pass_b_prompt = mock_chat.call_args_list[1].kwargs["messages"][0]["content"]
 
         assert "Pass B" in pass_b_prompt
-        assert '"Day 0"' in pass_b_prompt
-        assert '"Day 30"' in pass_b_prompt
+        # Misleading few-shot values made the model invent visits and tests.
+        for invented in ("Day 30", "blood glucose", "blood pressure", "Blood pressure"):
+            assert invented not in pass_b_prompt.split("PROTOCOL TEXT:")[0]
         assert "Never leave visit timing null" in pass_b_prompt
 
         visits_by_name = {
@@ -109,7 +110,7 @@ def test_prompt_requires_grounded_metadata_and_lab_criteria():
     assert "Never invent IDs" in pass_a_prompt
     assert "HbA1c" in pass_a_prompt
     assert "eGFR" in pass_a_prompt
-    assert "CLX-205" in pass_a_prompt
+    assert "CLX-205" not in pass_a_prompt
     assert "Do not omit lab-based eligibility criteria" in pass_a_prompt
     assert "[SOURCE PAGE 1]" in pass_a_prompt
     assert "Pass B" in pass_b_prompt

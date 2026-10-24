@@ -21,9 +21,12 @@ The agent never decides whether a person is eligible and never
 gives medical advice. All output still requires coordinator approval.
 """
 
+import hashlib
 import json
 import re
-from typing import Callable, List, Optional
+from datetime import datetime, timezone
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple
 
 from models.plain_language_models import (
     GlossaryTerm,
@@ -33,7 +36,13 @@ from models.plain_language_models import (
     PlainLanguageRewrite,
 )
 from models.protocol_models import ProtocolAnalysis
+from services import clinical_text, grounding
 from services.model_provider import ModelProviderError, chat_completion
+from services.source_verifier import (
+    normalize_text,
+    split_illustrative,
+    unsupported_claims,
+)
 
 MODEL_NAME = "qwen3:4b"
 MAX_ATTEMPTS = 2
@@ -168,25 +177,37 @@ UNSAFE_PATTERNS = [
 
 
 def extract_numbers(text: str) -> List[str]:
-    """Return every number in the text, e.g. '18', '7.5', '1,000'."""
-    return _NUMBER_PATTERN.findall(text)
+    """Every number in the text as written, e.g. '18', '7.5', '1,000', '.5'."""
+    return [m.group(0) for m in clinical_text.NUMBER_RE.finditer(text or "")]
 
 
 def find_missing_numbers(original: str, rewritten: str) -> List[str]:
-    """Numbers present in the original but missing from the rewrite."""
-    rewritten_numbers = set(extract_numbers(rewritten))
-    missing = []
-    for number in extract_numbers(original):
-        if number not in rewritten_numbers and number not in missing:
-            missing.append(number)
-    return missing
+    """Numbers (with units) present in the original but not kept exactly."""
+    return clinical_text.missing_numbers(original, rewritten)
 
 
-def find_unsafe_phrases(text: str) -> List[str]:
-    """Return phrases that look like medical advice or eligibility decisions."""
+# Phrases a negation can legitimately appear before ("do not stop taking ...").
+_ADVICE_PATTERNS = UNSAFE_PATTERNS[3:6]
+
+
+def find_unsafe_phrases(text: str, original: Optional[str] = None) -> List[str]:
+    """
+    Return phrases that look like medical advice or eligibility decisions.
+
+    A negated advice phrase ("do not stop taking your medicine") is a warning,
+    not advice, but only when the source statement itself says it. Eligibility
+    and over-promising phrases are never exempted.
+    """
     hits = []
     for pattern in UNSAFE_PATTERNS:
         for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            if (
+                original is not None
+                and pattern in _ADVICE_PATTERNS
+                and clinical_text.is_negated_in_context(text, match.start())
+                and clinical_text.original_restricts(original, match.group(0))
+            ):
+                continue
             hits.append(match.group(0))
     return hits
 
@@ -205,7 +226,32 @@ def check_rewrite(original: str, rewritten: str) -> List[str]:
             "These numbers from the original are missing: " + ", ".join(missing)
         )
 
-    unsafe = find_unsafe_phrases(rewritten)
+    explained = " ".join(t.explanation for t in find_medical_terms(original))
+    allowed = {f[0] for f in clinical_text.numeric_facts(explained)}
+    added = [
+        n for n in clinical_text.added_numbers(original, rewritten)
+        if n not in allowed
+    ]
+    if added:
+        problems.append(
+            "These numbers are not in the original (possible changed value): "
+            + ", ".join(added)
+        )
+
+    details = clinical_text.added_details(original, rewritten)
+    if details:
+        problems.append(
+            "The rewrite adds timing or frequency wording that the original does not state: "
+            + ", ".join(f'"{d}"' for d in details)
+        )
+    if clinical_text.dropped_hedge(original, rewritten):
+        problems.append(
+            'The original is approximate ("approximately"/"about") but the rewrite states it as exact'
+        )
+    problems.extend(clinical_text.condition_problems(original, rewritten))
+    problems.extend(clinical_text.negation_problems(original, rewritten))
+
+    unsafe = find_unsafe_phrases(rewritten, original)
     if unsafe:
         problems.append(
             "Contains medical advice or an eligibility decision: "
@@ -225,6 +271,9 @@ SECTION_GUIDANCE = {
     "visits": "This describes a scheduled trial visit.",
     "procedures": "This describes a test or procedure done during the trial.",
     "safety_information": "This is safety information about the trial.",
+    "study_interventions": "This describes the study treatment, its schedule or what to do if a dose is missed.",
+    "consent_withdrawal": "This describes voluntary participation, consent, privacy or the right to withdraw.",
+    "study_purpose": "This describes what the study is about.",
 }
 
 
@@ -240,7 +289,7 @@ Rules:
 - Use short sentences at about an 8th-grade reading level.
 - Explain medical words in simple terms the first time you use them.
 - Keep EVERY number, unit, and time period exactly as written,
-  using digits (for example keep "18", "7.5%", "Day 30", "65 years").
+  using digits (for example keep "18", "7.5%", "Day 5", "65 years").
 - Do not add facts that are not in the statement.
 - Do not remove any clinical detail or condition.
 - Describe requirements neutrally, e.g. "People in this trial must...".
@@ -283,25 +332,42 @@ def explain_statement(
     section: str,
     source_page: Optional[int] = None,
     rewriter: Optional[Rewriter] = None,
+    page_text: Optional[str] = None,
 ) -> GuideItem:
-    """Rewrite one protocol statement, check it, retry, or fall back."""
+    """
+    Rewrite one protocol statement, check it, retry, or fall back.
+
+    The rewrite is also checked against the cited protocol passage
+    (`page_text` is the authoritative text of its page) and the glossary
+    explanations of the terms in it: clinical wording found in neither is an
+    unsupported claim. After one retry with that feedback the original
+    protocol wording is kept and the failure stays visible as a warning.
+    """
     rewriter = rewriter or ollama_rewriter
     terms = find_medical_terms(original)
+    support = " ".join(
+        [original, grounding.passage_support(original, page_text)]
+        + [t.explanation for t in terms]
+    )
 
     feedback: Optional[str] = None
     problems: List[str] = []
+    failed = False
 
     for _ in range(MAX_ATTEMPTS):
         try:
             rewritten = rewriter(original, section, feedback)
         except ModelProviderError as error:
             problems = [f"The model provider could not produce a rewrite: {error}"]
+            failed = True
             break
         except Exception as error:  # model unavailable or invalid JSON
             problems = [f"The language model could not produce a rewrite ({type(error).__name__})."]
+            failed = True
             break
 
         problems = check_rewrite(original, rewritten)
+        problems += grounding.statement_problems(rewritten, support)
         if not problems:
             return GuideItem(
                 section=section,
@@ -323,6 +389,7 @@ def explain_statement(
         generated_by="fallback",
         needs_review=True,
         review_reasons=problems,
+        generation_failed=failed,
     )
 
 
@@ -341,113 +408,292 @@ def _procedure_text(procedure) -> str:
     return procedure.name
 
 
-def _build_section(
-    title: str,
-    introduction: str,
-    section: str,
-    statements: List[tuple],
-    rewriter: Optional[Rewriter],
-    on_item: Optional[Callable[[GuideItem], None]] = None,
-) -> GuideSection:
-    items = []
-    for text, page in statements:
+_UNVERIFIED_REASONS = {
+    "not_verified": "The statement was not found on its cited protocol page.",
+    "missing_page": "The statement has no cited protocol page.",
+    "invalid_page": "The statement cites a page that does not exist.",
+    "illustrative_only": (
+        "The statement appears only in an example or review-question "
+        "section, not in a protocol section."
+    ),
+    "timing_not_found": "The stated timing does not appear on the cited page.",
+}
+
+
+def apply_source_status(item: GuideItem, row: Optional[dict]) -> None:
+    """Record the source-verification result of the underlying fact."""
+    if row is None:
+        return  # no evidence either way: the item stays "unchecked"
+    if row.get("status") == "exact_match":
+        item.source_status = "verified"
+        item.source_issue = None
+        return
+    status = row.get("status")
+    item.source_status = "unverified"
+    item.source_issue = row.get("detail") or _UNVERIFIED_REASONS.get(
+        status, "The statement could not be verified against the protocol."
+    )
+    item.needs_review = True
+    reason = "Source check: " + item.source_issue
+    if reason not in item.review_reasons:
+        item.review_reasons.append(reason)
+
+
+def recheck_sources(guide: PatientGuide, rows: Optional[List[dict]]) -> int:
+    """
+    Give statements without a passing source check a fresh check from rows.
+
+    Applies to saved "unchecked" statements and to generated statements that
+    failed earlier (their rows may have been corrected since). A statement is
+    matched to the row with the same cited page whose checked text it
+    contains. Coordinator-edited statements are rechecked only by
+    reverify_item. Saved decisions and wording are kept; a statement with no
+    matching row is left as it is. Returns how many were resolved.
+    """
+    if not rows:
+        return 0
+    return sum(recheck_item_source(item, rows) for item in guide.all_items())
+
+
+def recheck_item_source(item: GuideItem, rows: Optional[List[dict]]) -> int:
+    """recheck_sources for one statement. Returns 1 when its status changed."""
+    if not rows or item.source_status == "verified" or item.generated_by == "coordinator":
+        return 0
+    original = normalize_text(item.original_text)
+    matches = [
+        r for r in rows
+        if r.get("source_page") == item.source_page
+        and normalize_text(r.get("statement") or "")
+        and normalize_text(r["statement"]) in original
+    ]
+    if not matches:
+        return 0
+    failing = next((r for r in matches if r.get("status") != "exact_match"), None)
+    before = item.source_status
+    item.review_reasons = [
+        r for r in item.review_reasons if not r.startswith("Source check:")
+    ]
+    item.source_status = "unchecked"
+    apply_source_status(item, failing or matches[0])
+    if item.source_status == "unverified":
+        item.approved = False  # keeps the text and review notes
+    else:
+        item.needs_review = bool(item.review_reasons)
+    return int(item.source_status != before)
+
+
+@dataclass(frozen=True)
+class StatementSpec:
+    """One statement to rewrite: where it goes and what it says."""
+
+    attr: str  # PatientGuide attribute that holds its section
+    section: str  # GuideItem.section value
+    category: str  # verification category
+    text: str
+    page: Optional[int]
+    key: str  # what the source verifier matched
+    item_id: str
+    seq: int
+    # Every protocol page that states the same thing (first one is `page`).
+    pages: Tuple[int, ...] = ()
+
+
+# (title, introduction) of each guide section, in display order.
+SECTION_DEFS = {
+    "purpose": ("About the study", "This is what the study is about."),
+    "who_can_join": (
+        "Who may be able to join",
+        "These are the trial's requirements. Meeting them is not a final "
+        "decision. Only the study team can decide who is eligible.",
+    ),
+    "who_cannot_join": (
+        "Who may not be able to join",
+        "People with any of these conditions may not be able to take part. "
+        "The study team will review each person's situation.",
+    ),
+    "visits": ("Trial visits", "These are the planned visits during the trial."),
+    "procedures": (
+        "Tests and procedures",
+        "These are the tests and procedures that are part of the trial.",
+    ),
+    "interventions": (
+        "Study treatment",
+        "This is the study treatment and how it is taken.",
+    ),
+    "safety": (
+        "Safety information",
+        "This is how the trial watches for and handles safety concerns. "
+        "Tell the study team right away about any health changes.",
+    ),
+    "consent": (
+        "Your rights, consent and withdrawal",
+        "Taking part is your choice. This is how consent, privacy and "
+        "leaving the study work.",
+    ),
+}
+
+# Guide section that holds items of each GuideItem.section value.
+SECTION_ATTR = {
+    "inclusion_criteria": "who_can_join",
+    "exclusion_criteria": "who_cannot_join",
+    "visits": "visits",
+    "procedures": "procedures",
+    "study_interventions": "interventions",
+    "safety_information": "safety",
+    "consent_withdrawal": "consent",
+    "study_purpose": "purpose",
+}
+
+
+def make_item_id(section: str, text: str, page: Optional[int]) -> str:
+    """Stable identity of a statement: independent of list position."""
+    basis = f"{section}|{normalize_text(text)}|{page}"
+    return hashlib.sha1(basis.encode()).hexdigest()[:12]
+
+
+def statement_specs(analysis: ProtocolAnalysis) -> List[StatementSpec]:
+    """Every statement the guide will contain, in display order, de-duplicated."""
+    raw: List[tuple] = []
+
+    def add(attr, section, category, entries):
+        for entry in entries:
+            text, page = entry[0], entry[1]
+            key = entry[2] if len(entry) > 2 else text
+            raw.append((attr, section, category, text, page, key))
+
+    add("purpose", "study_purpose", "patient_information",
+        _info(analysis, "study_purpose"))
+    add("who_can_join", "inclusion_criteria", "inclusion_criteria",
+        [(c.description, c.source_page) for c in analysis.inclusion_criteria])
+    add("who_cannot_join", "exclusion_criteria", "exclusion_criteria",
+        [(c.description, c.source_page) for c in analysis.exclusion_criteria])
+    add("visits", "visits", "visits",
+        [(_visit_text(v), v.source_page, v.visit_name) for v in analysis.visits])
+    add("procedures", "procedures", "procedures",
+        [(_procedure_text(p), p.source_page, p.name) for p in analysis.procedures])
+    add("procedures", "procedures", "patient_information",
+        _info(analysis, "blood_collection"))
+    add("interventions", "study_interventions", "patient_information",
+        _info(analysis, "interventions"))
+    add("safety", "safety_information", "safety_information",
+        [(s.description, s.source_page) for s in analysis.safety_information])
+    add("safety", "safety_information", "patient_information",
+        _info(analysis, "risks"))
+    add("consent", "consent_withdrawal", "patient_information",
+        _info(analysis, "consent_withdrawal"))
+
+    # One statement per distinct meaning: identical wording in the same section
+    # is merged and keeps every page it appeared on. Visits merge by name when
+    # their timings do not conflict. Different numbers or conditions never merge.
+    groups: List[dict] = []
+    for attr, section, category, text, page, key in raw:
         if not text or not text.strip():
             continue
-        item = explain_statement(text, section, page, rewriter)
-        items.append(item)
-        if on_item:
-            on_item(item)
-    unavailable = None
-    if not items:
-        unavailable = (
-            "The trial document did not include this information. "
-            "Please ask the study team."
+        norm = normalize_text(text).rstrip(". ")
+        visit_name = normalize_text(key).rstrip(". ") if section == "visits" else None
+        group = next(
+            (
+                g for g in groups
+                if g["section"] == section and g["category"] == category
+                and (
+                    g["norm"] == norm
+                    or (
+                        visit_name is not None
+                        and g["visit_name"] == visit_name
+                        and _timing_compatible(g["text"], text)
+                    )
+                )
+            ),
+            None,
         )
-    return GuideSection(
-        title=title,
-        introduction=introduction,
-        items=items,
-        unavailable_message=unavailable,
-    )
+        if group is None:
+            groups.append({
+                "attr": attr, "section": section, "category": category,
+                "text": text, "page": page, "key": key, "norm": norm,
+                "visit_name": visit_name,
+                "pages": [page] if page is not None else [],
+            })
+            continue
+        if page is not None and page not in group["pages"]:
+            group["pages"].append(page)
+        if visit_name is not None and len(text) > len(group["text"]):
+            group.update(text=text, page=page, norm=norm)  # keep the fuller wording
+    specs: List[StatementSpec] = []
+    seen = set()
+    for g in groups:
+        item_id = make_item_id(g["section"], g["text"], g["page"])
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        pages = tuple([g["page"]] + [p for p in g["pages"] if p != g["page"]]) \
+            if g["page"] is not None else tuple(g["pages"])
+        specs.append(StatementSpec(
+            g["attr"], g["section"], g["category"], g["text"], g["page"],
+            g["key"], item_id, len(specs), pages,
+        ))
+    return specs
+
+
+def _timing_compatible(first: str, second: str) -> bool:
+    """Visit texts merge unless both state a timing and the timings differ."""
+    def timing(text: str) -> str:
+        match = re.search(r"Timing: ([^.]*(?:\.\d[^.]*)*)", text)
+        return normalize_text(match.group(1)) if match else ""
+
+    a, b = timing(first), timing(second)
+    return not a or not b or a == b
 
 
 def count_statements(analysis: ProtocolAnalysis) -> int:
     """Number of protocol statements the guide will rewrite (for progress bars)."""
-    return (
-        len(analysis.inclusion_criteria)
-        + len(analysis.exclusion_criteria)
-        + len(analysis.visits)
-        + len(analysis.procedures)
-        + len(analysis.safety_information)
-    )
+    return len(statement_specs(analysis))
 
 
-def generate_patient_guide(
-    analysis: ProtocolAnalysis,
+def verification_index(rows: Optional[List[dict]]) -> Optional[dict]:
+    """(category, normalized statement) -> row; a failing row beats a passing one."""
+    if rows is None:
+        return None
+    index: dict = {}
+    for row in rows:
+        key = (row.get("category"), normalize_text(row.get("statement") or ""))
+        if key not in index or index[key].get("status") == "exact_match":
+            index[key] = row
+    return index
+
+
+def _info(analysis: ProtocolAnalysis, *categories: str) -> List[tuple]:
+    return [
+        (i.description, i.source_page)
+        for i in analysis.patient_information
+        if i.category in categories
+    ]
+
+
+def generate_item(
+    spec: StatementSpec,
     rewriter: Optional[Rewriter] = None,
-    on_item: Optional[Callable[[GuideItem], None]] = None,
-) -> PatientGuide:
-    """
-    Build a patient-friendly guide from a structured protocol analysis.
+    index: Optional[dict] = None,
+    source_pages: Optional[dict] = None,
+) -> GuideItem:
+    """Rewrite and automatically check one statement."""
+    page_text = None
+    if source_pages and spec.page is not None:
+        raw = source_pages.get(str(spec.page), source_pages.get(spec.page))
+        page_text = split_illustrative(raw)[0] if raw else None
+    item = explain_statement(
+        spec.text, spec.section, spec.page, rewriter, page_text=page_text
+    )
+    item.item_id = spec.item_id
+    item.source_pages = [p for p in spec.pages if p != spec.page]
+    if index is not None:
+        apply_source_status(
+            item, index.get((spec.category, normalize_text(spec.key or "")))
+        )
+    return item
 
-    Pass a custom `rewriter` to use a different model, or a fake one in tests.
-    `on_item` is called after each item is finished (used for progress bars).
-    Every item starts unapproved: a coordinator must approve it before
-    patients can see it.
-    """
-    who_can_join = _build_section(
-        "Who may be able to join",
-        "These are the trial's requirements. Meeting them is not a final "
-        "decision. Only the study team can decide who is eligible.",
-        "inclusion_criteria",
-        [(c.description, c.source_page) for c in analysis.inclusion_criteria],
-        rewriter,
-        on_item,
-    )
-    who_cannot_join = _build_section(
-        "Who may not be able to join",
-        "People with any of these conditions may not be able to take part. "
-        "The study team will review each person's situation.",
-        "exclusion_criteria",
-        [(c.description, c.source_page) for c in analysis.exclusion_criteria],
-        rewriter,
-        on_item,
-    )
-    visits = _build_section(
-        "Trial visits",
-        "These are the planned visits during the trial.",
-        "visits",
-        [(_visit_text(v), v.source_page) for v in analysis.visits],
-        rewriter,
-        on_item,
-    )
-    procedures = _build_section(
-        "Tests and procedures",
-        "These are the tests and procedures that are part of the trial.",
-        "procedures",
-        [(_procedure_text(p), p.source_page) for p in analysis.procedures],
-        rewriter,
-        on_item,
-    )
-    safety = _build_section(
-        "Safety information",
-        "This is how the trial watches for and handles safety concerns. "
-        "Tell the study team right away about any health changes.",
-        "safety_information",
-        [(s.description, s.source_page) for s in analysis.safety_information],
-        rewriter,
-        on_item,
-    )
 
-    glossary: List[GlossaryTerm] = []
-    seen = set()
-    for section in (who_can_join, who_cannot_join, visits, procedures, safety):
-        for item in section.items:
-            for term in item.terms_explained:
-                if term.term not in seen:
-                    seen.add(term.term)
-                    glossary.append(term)
-
+def new_guide_shell(analysis: ProtocolAnalysis, total: int, complete: bool) -> PatientGuide:
+    """An empty guide with its section titles, ready to receive statements."""
     # Analyses created before completeness tracking are legacy short-path
     # fixtures. A newly produced long-path result always sets the field, and
     # the pipeline converts an absent long-path value to False.
@@ -456,21 +702,152 @@ def generate_patient_guide(
         if "analysis_complete" in analysis.model_fields_set
         else True
     )
-    guide = PatientGuide(
+    sections = {
+        attr: GuideSection(title=title, introduction=intro)
+        for attr, (title, intro) in SECTION_DEFS.items()
+    }
+    return PatientGuide(
         trial_title=analysis.trial_title,
         protocol_id=analysis.protocol_id,
         analysis_complete=analysis_complete,
-        who_can_join=who_can_join,
-        who_cannot_join=who_cannot_join,
-        visits=visits,
-        procedures=procedures,
-        safety=safety,
-        glossary=glossary,
         disclaimer=DISCLAIMER,
+        generation_total=total,
+        generation_complete=complete,
+        **sections,
     )
+
+
+def finalize_guide(guide: PatientGuide) -> PatientGuide:
+    """Fill in what depends on the whole guide: empty-section notes and glossary."""
+    for section in guide.sections():
+        section.unavailable_message = (
+            None if section.items else
+            "The trial document did not include this information. "
+            "Please ask the study team."
+        )
+    guide.glossary = []
+    seen = set()
     for item in guide.all_items():
-        item.analysis_complete = analysis_complete
+        item.analysis_complete = guide.analysis_complete
+        for term in item.terms_explained:
+            if term.term not in seen:
+                seen.add(term.term)
+                guide.glossary.append(term)
     return guide
+
+
+def generate_patient_guide(
+    analysis: ProtocolAnalysis,
+    rewriter: Optional[Rewriter] = None,
+    on_item: Optional[Callable[[GuideItem], None]] = None,
+    verification: Optional[List[dict]] = None,
+    reuse: Optional[Dict[str, GuideItem]] = None,
+    source_pages: Optional[Dict[str, str]] = None,
+) -> PatientGuide:
+    """
+    Build a patient-friendly guide from a structured protocol analysis.
+
+    Pass a custom `rewriter` to use a different model, or a fake one in tests.
+    `on_item` is called after each item is finished (progress and saving).
+    `verification` (rows from verify_source_pages) marks statements whose
+    underlying fact could not be verified; those cannot be approved.
+    `reuse` maps item ids to statements already generated, which are kept
+    instead of being rewritten again.
+    `source_pages` (page number -> protocol page text) grounds each rewrite in
+    the cited passage.
+    Every item starts unapproved: a coordinator must approve it before
+    patients can see it.
+    """
+    index = verification_index(verification)
+    specs = statement_specs(analysis)
+    guide = new_guide_shell(analysis, len(specs), True)
+    reuse = reuse or {}
+    for spec in specs:
+        item = reuse.get(spec.item_id) or generate_item(spec, rewriter, index, source_pages)
+        getattr(guide, spec.attr).items.append(item)
+        if on_item:
+            on_item(item)
+    return finalize_guide(guide)
+
+
+def ensure_item_ids(guide: PatientGuide) -> bool:
+    """
+    Give saved statements a unique stable id. True if any changed.
+
+    Statements without an id get one from their content; a repeated id (two
+    identical statements) gets a numbered suffix so every widget key and
+    decision stays unique.
+    """
+    items = guide.all_items()
+    used: set = set()
+    changed = False
+    for item in items:
+        if item.item_id and item.item_id not in used:
+            used.add(item.item_id)
+            continue
+        base = item.item_id or make_item_id(
+            item.section, item.original_text, item.source_page
+        )
+        candidate, n = base, 2
+        while candidate in used:
+            candidate, n = f"{base}-{n}", n + 1
+        item.item_id = candidate
+        used.add(candidate)
+        changed = True
+    return changed
+
+
+def merge_generated(
+    guide: PatientGuide,
+    analysis: ProtocolAnalysis,
+    generated: Dict[str, GuideItem],
+) -> bool:
+    """
+    Add newly generated statements to a guide without touching reviewed ones.
+
+    Statements already in the guide keep their object (and so their review
+    decisions). A failed statement nobody has decided on yet is replaced by a
+    successful retry. Sections keep protocol order. Returns True when the
+    guide changed.
+    """
+    specs = statement_specs(analysis)
+    order = {s.item_id: s.seq for s in specs}
+    changed = False
+    present = {i.item_id: i for i in guide.all_items() if i.item_id}
+    for spec in specs:
+        new = generated.get(spec.item_id)
+        if new is None:
+            continue
+        section = getattr(guide, spec.attr)
+        old = present.get(spec.item_id)
+        if old is None:
+            section.items.append(new)
+            present[spec.item_id] = new
+            changed = True
+        elif (
+            old.generation_failed and not new.generation_failed
+            and not (old.approved or old.rejected or old.generated_by == "coordinator")
+        ):
+            section.items[section.items.index(old)] = new
+            present[spec.item_id] = new
+            changed = True
+    for section in guide.sections():
+        section.items.sort(key=lambda i: order.get(i.item_id, len(order)))
+    guide.generation_total = len(specs)
+    complete = not specs or all(
+        s.item_id in present
+        and not (
+            present[s.item_id].generation_failed
+            and not present[s.item_id].rejected
+        )
+        for s in specs
+    )
+    if guide.generation_complete != complete:
+        guide.generation_complete = complete
+        changed = True
+    if complete:
+        finalize_guide(guide)
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +872,8 @@ def edit_item(item: GuideItem, new_text: str) -> List[str]:
         item.approved = False
         item.rejected = False
         item.verification = "needs_reverification"
+        item.generation_failed = False
+        clear_override(item)
     item.needs_review = bool(warnings)
     item.review_reasons = warnings
     return warnings
@@ -502,33 +881,61 @@ def edit_item(item: GuideItem, new_text: str) -> List[str]:
 
 def find_added_numbers(original: str, rewritten: str) -> List[str]:
     """Numbers in the rewrite that the protocol excerpt does not contain."""
-    original_numbers = set(extract_numbers(original))
-    added = []
-    for number in extract_numbers(rewritten):
-        if number not in original_numbers and number not in added:
-            added.append(number)
-    return added
+    return clinical_text.added_numbers(original, rewritten)
 
 
-def reverify_item(item: GuideItem) -> List[str]:
+def reverify_item(item: GuideItem, source_page_text: Optional[str] = None) -> List[str]:
     """
-    Recheck an edited statement against its original protocol excerpt.
+    Recheck an edited statement against the protocol.
 
-    Besides the usual safety checks, the edit may not introduce numbers that
-    the excerpt does not contain. Returns the problems; an empty list means the
-    statement is verified (it still needs explicit approval).
+    A statement whose source check passed may not add numbers that its
+    protocol excerpt lacks. A statement that failed (or never had) a source
+    check is only cleared when every sentence of the edit is supported by one
+    passage of the authoritative text of its cited page: figures, negations
+    and most content words must appear together. Numbers that merely occur
+    somewhere on the page are not evidence. Returns the problems; an empty
+    list means the statement is verified (it still needs explicit approval).
     """
-    problems = check_rewrite(item.original_text, item.plain_text)
-    added = find_added_numbers(item.original_text, item.plain_text)
-    if added:
-        problems.append(
-            "These numbers are not in the protocol excerpt: " + ", ".join(added)
-        )
+    needs_source_proof = item.source_status != "verified"
+    if needs_source_proof:
+        # The old excerpt is what failed, so it is not a reference: only
+        # safety wording is checked here and the page is the evidence.
+        problems = [
+            p for p in check_rewrite(item.original_text, item.plain_text)
+            if p.startswith("Contains medical advice")
+        ]
+        if not source_page_text:
+            problems.append(
+                "The source page text is unavailable, so an edit cannot "
+                "fix a statement that failed its source check. Re-run the "
+                "analysis for this protocol."
+            )
+        elif item.generated_by != "coordinator":
+            problems.append(
+                "Only an edited statement can be cleared after a failed "
+                "source check; edit it to match the protocol."
+            )
+        else:
+            unsupported = unsupported_claims(
+                item.plain_text, split_illustrative(source_page_text)[0]
+            )
+            if unsupported:
+                problems.append(
+                    f"Not supported by protocol page {item.source_page}: "
+                    + "; ".join(f"“{c}”" for c in unsupported)
+                )
+    else:
+        problems = check_rewrite(item.original_text, item.plain_text)
     if problems:
         item.verification = "needs_reverification"
         item.needs_review = True
         item.review_reasons = problems
     else:
+        if needs_source_proof:
+            item.superseded_text = item.original_text
+            item.original_text = item.plain_text
+            item.source_status = "verified"
+            item.source_issue = None
         item.verification = "verified"
         item.needs_review = False
         item.review_reasons = []
@@ -538,18 +945,119 @@ def reverify_item(item: GuideItem) -> List[str]:
 REJECTED_REASON = "Marked not accurate by the coordinator."
 
 
-def approve_item(item: GuideItem) -> None:
-    """Mark one item as approved by the coordinator."""
-    if item.analysis_complete is not True:
-        raise ValueError(
-            "Cannot approve patient content from an incomplete or "
-            "unverified protocol analysis."
+_HARD_PREFIXES = ("Contains medical advice", "The rewrite was empty")
+
+
+def safety_blockers(item: GuideItem) -> List[str]:
+    """Problems no coordinator override can clear (unsafe or empty wording)."""
+    if item.generated_by != "coordinator":
+        return []
+    return [
+        p for p in check_rewrite(item.original_text, item.plain_text)
+        if p.startswith(_HARD_PREFIXES)
+    ]
+
+
+def verification_warnings(item: GuideItem) -> List[str]:
+    """
+    What the automatic checks say about this statement.
+
+    These inform the coordinator's decision; they are kept apart from it. A
+    coordinator may approve over them only as a recorded override.
+    """
+    warnings: List[str] = []
+    if item.source_status == "unchecked":
+        warnings.append("Not yet checked against the protocol source.")
+    elif item.source_status != "verified":
+        warnings.append(
+            "Not verified against the protocol: "
+            + (item.source_issue or "its source could not be confirmed.")
         )
     if item.verification != "verified":
-        raise ValueError(
-            "This edited statement must be reverified against the protocol "
-            "before it can be approved."
+        warnings.append("Edited wording has not been reverified against the protocol.")
+    if item.generated_by == "coordinator":
+        warnings.extend(
+            p for p in check_rewrite(item.original_text, item.plain_text)
+            if not p.startswith(_HARD_PREFIXES)
         )
+    elif item.generated_by == "fallback":
+        # The rewrite was rejected as unsupported: the protocol wording is
+        # shown, but the failure must stay visible and cannot read as verified.
+        warnings.extend(
+            r for r in item.review_reasons
+            if r.startswith(grounding.UNSUPPORTED_PREFIX)
+        )
+    elif item.generated_by == "llm":
+        # A fallback shows the protocol's own wording, so the reasons its
+        # rewrite failed are notes (shown in the details), not warnings.
+        warnings.extend(r for r in item.review_reasons if r != REJECTED_REASON)
+    return list(dict.fromkeys(warnings))
+
+
+def clear_override(item: GuideItem) -> None:
+    item.override = False
+    item.override_reason = None
+    item.override_warnings = []
+    item.override_at = None
+
+
+def override_valid(item: GuideItem) -> bool:
+    """A recorded override covers the current warnings (none are new)."""
+    return (
+        item.override
+        and bool((item.override_reason or "").strip())
+        and set(verification_warnings(item)) <= set(item.override_warnings)
+    )
+
+
+def item_cleared(item: GuideItem) -> bool:
+    """True when the statement is verified or carries a valid human override."""
+    if safety_blockers(item) or item.generation_failed:
+        return False
+    return not verification_warnings(item) or override_valid(item)
+
+
+def approval_block_reason(item: GuideItem) -> Optional[str]:
+    """
+    Why this statement can never be approved, even with an override.
+
+    Verification warnings are not blockers: they need an acknowledgement and
+    a reason (see approve_item). Unsafe wording and failed generation are.
+    """
+    if item.generation_failed:
+        return (
+            "The wording could not be generated. Retry generation or edit "
+            "the statement."
+        )
+    problems = safety_blockers(item)
+    if problems:
+        return "Failed a safety check: " + " ".join(problems)
+    return None
+
+
+def approve_item(item: GuideItem, override_reason: Optional[str] = None) -> None:
+    """
+    Mark one item as approved by the coordinator.
+
+    A statement with verification warnings needs an override reason; the
+    warnings are recorded with the approval. Safety blockers always refuse.
+    """
+    reason = approval_block_reason(item)
+    if reason:
+        raise ValueError(reason)
+    warnings = verification_warnings(item)
+    if warnings:
+        if not (override_reason or "").strip():
+            raise ValueError(
+                "This statement has verification warnings. Acknowledge them "
+                "and give a reason to approve it."
+            )
+        item.override = True
+        item.override_reason = override_reason.strip()
+        item.override_warnings = warnings
+        item.override_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    else:
+        clear_override(item)
     item.approved = True
     if item.rejected:
         item.rejected = False
@@ -578,32 +1086,59 @@ def reject_item(item: GuideItem) -> None:
 
 def approve_all_unflagged(guide: PatientGuide) -> int:
     """
-    Approve every item that passed all automatic checks.
+    Approve every pending statement that has no verification warning.
 
-    Flagged items are left for individual human review.
-    Returns the number of items newly approved.
+    Statements with warnings are never approved here; they need
+    approve_all_with_override or an individual decision. Returns the number
+    newly approved.
     """
-    if guide.analysis_complete is not True:
-        raise ValueError(
-            "Cannot approve patient content from an incomplete or "
-            "unverified protocol analysis."
-        )
-    if any(item.analysis_complete is not True for item in guide.all_items()):
-        raise ValueError(
-            "Cannot approve patient content containing items from an "
-            "incomplete or unverified protocol analysis."
-        )
-
     count = 0
     for item in guide.all_items():
         if (
-            not item.needs_review
-            and not item.approved
-            and item.verification == "verified"
+            not item.approved
+            and not item.rejected
+            and approval_block_reason(item) is None
+            and not verification_warnings(item)
+            and not item.needs_review
         ):
-            item.approved = True
+            approve_item(item)
             count += 1
     return count
+
+
+def overridable_items(guide: PatientGuide) -> List[GuideItem]:
+    """Pending statements the coordinator could approve over a warning."""
+    return [
+        i for i in guide.all_items()
+        if not i.rejected
+        and not (i.approved and item_cleared(i))
+        and approval_block_reason(i) is None
+        and (verification_warnings(i) or i.needs_review)
+    ]
+
+
+def approve_all_with_override(guide: PatientGuide, reason: str) -> int:
+    """Approve every overridable statement with one recorded reason."""
+    if not (reason or "").strip():
+        raise ValueError("A reason is required to approve over verification warnings.")
+    items = overridable_items(guide)
+    for item in items:
+        flagged = item.needs_review and not verification_warnings(item)
+        approve_item(item, reason)
+        if flagged:
+            # Flagged rewrite that fell back to the protocol wording: the
+            # bulk approval still counts as a recorded human override.
+            item.override = True
+            item.override_reason = reason.strip()
+            item.override_warnings = [
+                r for r in item.review_reasons if r != REJECTED_REASON
+            ]
+            item.override_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return len(items)
+
+
+def active_overrides(guide: PatientGuide) -> List[GuideItem]:
+    return [i for i in guide.all_items() if i.approved and not i.rejected and i.override]
 
 
 # ---------------------------------------------------------------------------

@@ -17,8 +17,9 @@ import streamlit as st
 
 from agents.guide_patient_agent import answer_patient_from_guide
 from agents.plain_language_agent import display_term, explain_term_query
-from models.plain_language_models import PatientGuide
+from models.plain_language_models import PatientGuide, page_label
 from services.chat_intents import social_answer
+from services.summary_review import format_summary_markdown
 from services.guide_review import patient_visible_guide, with_coordinator_referral
 from ui import chat_store, split_pane, theme
 from ui.landing import (
@@ -162,6 +163,10 @@ def render_guide_panel(guide: Optional[PatientGuide]) -> None:
         f'<div class="ctai-chip-row">{proto}{status}</div></div>'
     )
 
+    if guide.summary:
+        with st.expander("Summary", expanded=True, icon=":material/summarize:"):
+            st.markdown(format_summary_markdown(guide.summary))
+
     for section in guide.sections():
         color = _SECTION_ICON.get(section.title, theme.LAVENDER)
         with st.expander(
@@ -179,7 +184,7 @@ def render_guide_panel(guide: Optional[PatientGuide]) -> None:
                 st.html('<div class="ctai-pending">This part is still being reviewed by the study team.</div>')
                 continue
             for item in approved:
-                page = f"<small>Protocol page {item.source_page}</small>" if item.source_page else ""
+                page = f"<small>Protocol {page_label(item)}</small>" if item.source_page else ""
                 st.html(f'<div class="ctai-item">{theme.e(item.plain_text)}{page}</div>')
             if pending:
                 word = "item is" if pending == 1 else "items are"

@@ -6,6 +6,8 @@ pipeline result and a fake rewriter, so no Ollama server is needed.
 """
 
 import threading
+from tests.publish_helpers import exact_rows, generate_verified_guide
+from tests.publish_helpers import make_publishable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -52,7 +54,8 @@ def _pipeline_result():
     return {
         "analysis": analysis,
         "analysis_complete": True,
-        "verification": [],
+        "verification": exact_rows(analysis),
+        "completeness_audit": {"categories": {}},
         "extraction_warnings": [],
         "accuracy_warnings": [],
     }
@@ -81,6 +84,7 @@ def _eight_statement_result():
             source_page=4,
         )
     )
+    result["verification"] = exact_rows(analysis)
     return result
 
 
@@ -93,7 +97,7 @@ def _fake_rewriter(original, section, feedback=None):
 
 def _approved_guide(result=None):
     analysis = (result or _pipeline_result())["analysis"]
-    guide = generate_patient_guide(analysis, rewriter=_fake_rewriter)
+    guide = generate_verified_guide(analysis, rewriter=_fake_rewriter)
     for item in guide.all_items():
         item.approved = True
         item.rejected = False
@@ -112,6 +116,7 @@ def _prepare_review_app(result=None, guide=None):
     }
     if guide is not None:
         at.session_state["patient_guide"] = guide
+    make_publishable("protocol-eight")
     return at.run()
 
 
@@ -174,7 +179,9 @@ def test_term_definition_answer_ignores_other_questions():
 
 def test_item_status_labels():
     item = explain_statement("Age 18.", "inclusion_criteria", rewriter=lambda o, s, f=None: o)
-    assert item_status(item) == "⏳ Waiting for approval"
+    assert item_status(item) == "⏳ Waiting for your decision"  # AI warning, no decision
+    item.source_status = "verified"
+    assert item_status(item) == "⏳ Waiting for your decision"
     item.approved = True
     assert item_status(item) == "✅ Approved"
 
@@ -362,7 +369,7 @@ def test_protocol_name_cannot_overwrite_another_protocol():
     assert any("already saved for another protocol" in item.value for item in at.warning)
 
 
-def test_publication_requires_every_statement_to_be_approved_and_not_rejected():
+def test_publication_requires_every_statement_to_be_approved_and_not_rejected(publish_context):
     from app import can_publish_guide, publish_block_reason
 
     result = _pipeline_result()
@@ -529,6 +536,8 @@ def test_generate_review_and_publish_flow():
         if button.key and button.key.endswith("_approve")
     )
     at = _click(at, flagged_approval)
+    make_publishable(at.session_state["coordinator_protocol_id"])
+    at = at.run()
     assert not at.button(key="publish_protocol_btn").disabled
     at = _click(at, "publish_protocol_btn")
     assert any(
@@ -667,12 +676,11 @@ def test_incomplete_guide_disables_approval_and_blocks_patient_view():
     assert not at.exception
     guide = at.session_state["patient_guide"]
     assert guide.analysis_complete is False
-    approve_all = next(b for b in at.button if b.key == "guide_approve_all_btn")
-    assert approve_all.disabled
+    # Approval is per statement now; only publication needs a complete analysis.
     first_item_approval = next(
         b for b in at.button if b.key and b.key.endswith("_approve")
     )
-    assert first_item_approval.disabled
+    assert not first_item_approval.disabled
     assert at.button(key="publish_protocol_btn").disabled
 
     # Even pre-approved state cannot publish incomplete content to patients.
@@ -776,6 +784,8 @@ def _reviewed_session(approve=True):
         at = _click(at, "guide_approve_all_btn")
         for button in [b for b in at.button if b.key and b.key.endswith("_approve")]:
             at = _click(at, button.key)
+        make_publishable(protocol_id)
+        at = at.run()
     return at, analyzer, protocol_id
 
 
