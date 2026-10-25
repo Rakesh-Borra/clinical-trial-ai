@@ -8,6 +8,7 @@ upload and is cached in session state. Does not modify backend modules.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -22,16 +23,21 @@ from models.plain_language_models import PatientGuide
 from models.protocol_models import ProtocolAnalysis
 from agents.guide_patient_agent import APPROVED_STATUS
 from models.protocol_models import ProtocolAnalysis
-from services import analysis_jobs, authz, review_store
+from services import analysis_jobs, authz, guide_jobs, review_store, version_compare, version_store
 from services.model_provider import provider_display_name
 from services.protocol_pipeline import analyze_protocol_pdf
 from services import benchmark_log
-from ui import auth_pages, theme
+from ui import auth_pages, coordinator_home, theme
 from ui.landing import (
+    COORD_VIEW_KEY,
     COORDINATOR,
     NAME_KEY,
     PATIENT,
     ROLE_KEY,
+    VIEW_HOME,
+    VIEW_LIST,
+    VIEW_VERSIONS,
+    VIEW_WORKFLOW,
     coordinator_page,
     navigate_to_page,
     patient_page,
@@ -39,16 +45,16 @@ from ui.landing import (
     render_landing,
     render_top_bar,
 )
-from services.coverage import build_coverage, coverage_block_reason
+from services.coverage import build_coverage, missing_categories
 from services.guide_review import build_published_snapshot, decision_block_reason
 from services.summary_review import is_summary_approved, summary_publish_block_reason
 from ui.summary_panel import (
-    render_coverage_panel,
     render_summary_generation,
     render_summary_panel,
 )
 from agents.plain_language_agent import guide_to_markdown
 from ui.patient_guide_tab import (
+    GUIDE_JOB_KEY,
     GUIDE_KEY,
     GUIDE_SOURCE_KEY,
     analysis_fingerprint,
@@ -60,6 +66,7 @@ from ui.patient_guide_tab import (
     render_guide_review_tab,
 )
 from ui.patient_view import render_patient_workspace
+from ui.version_panel import render_version_panel
 
 RESEARCH_DISCLAIMER = (
     "Research prototype for educational demonstration only. This tool does "
@@ -736,6 +743,21 @@ def current_protocol_name() -> str:
     return name.strip() if isinstance(name, str) else ""
 
 
+def _same_study_ids() -> set[str]:
+    """Other versions of the study the current protocol belongs to (or will join)."""
+    ids: set[str] = set()
+    try:
+        protocol_id = st.session_state.get("coordinator_protocol_id")
+        if protocol_id:
+            ids |= version_store.sibling_ids(protocol_id)
+        study_id = st.session_state.get("coord_study_id")
+        if study_id:
+            ids |= version_store.members(study_id)
+    except (sqlite3.Error, OSError):
+        pass
+    return ids
+
+
 def publish_block_reason(
     guide: Any,
     pipeline_result: Optional[Mapping[str, Any]],
@@ -773,27 +795,64 @@ def publish_block_reason(
     if reason:
         return reason
 
-    snapshot = build_published_snapshot(guide)
+    unsaved = [t for t in unsaved_work()[0] if "protocol name" not in t]
+    if unsaved:
+        return f"Save or cancel your edits first: {unsaved[0]}."
+
     protocol_id = st.session_state.get("coordinator_protocol_id")
     if not protocol_id:
         # Coverage overrides and the approved summary are stored per protocol.
         return "Cannot publish: the protocol has no active identifier. Upload it again."
+    snapshot = build_published_snapshot(guide)
     try:
-        reason = coverage_block_reason(
-            build_coverage(pipeline_result, snapshot),
-            review_store.load_coverage_overrides(protocol_id),
-            pipeline_result.get("analysis_complete") is True,
-        ) or summary_publish_block_reason(
+        reason = summary_publish_block_reason(
             review_store.load_summary(protocol_id), snapshot
-        )
+        ) or version_compare.comparison_block_reason(protocol_id, guide)
+        if reason:
+            return reason
+        missing, fingerprint = acknowledgment_context(guide, pipeline_result, protocol_id)
+        if missing and not review_store.acknowledgment_valid(protocol_id, fingerprint):
+            return (
+                "Missing categories: " + "; ".join(missing)
+                + ". Tick the acknowledgment below to publish with incomplete information."
+            )
     except sqlite3.Error as exc:
         return f"Cannot publish: review data could not be read ({exc})."
-    if reason:
-        return reason
 
     if not is_fully_approved_snapshot(snapshot):
         return "The patient guide did not pass final approval validation."
     return None
+
+
+def acknowledgment_context(
+    guide: Any, pipeline_result: Mapping[str, Any], protocol_id: str
+) -> tuple[list[str], str]:
+    """
+    The critical categories still missing, and a fingerprint of what the coordinator
+    would be accepting: the version, the publishable statements, the summary
+    text and the list of gaps. Any change to these invalidates an acknowledgment.
+    """
+    snapshot = build_published_snapshot(guide)
+    missing = missing_categories(
+        build_coverage(pipeline_result, snapshot),
+        review_store.load_coverage_overrides(protocol_id),
+        pipeline_result.get("analysis_complete") is True,
+    )
+    summary = review_store.load_summary(protocol_id) or {}
+    version = version_store.get_version(protocol_id) or {}
+    payload = json.dumps(
+        {
+            "protocol": protocol_id,
+            "version": version.get("version_label"),
+            "guide": _guide_content(snapshot),
+            "summary": summary.get("draft_text"),
+            "approved_summary": summary.get("approved_text"),
+            "missing": missing,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return missing, hashlib.sha256(payload.encode()).hexdigest()
 
 
 def can_publish_guide(guide: Any, pipeline_result: Optional[Mapping[str, Any]]) -> bool:
@@ -883,8 +942,10 @@ def publish_current_protocol() -> tuple[bool, str]:
         return False, reason
 
     published = dict(st.session_state.get("published_protocols", {}))
+    same_study = _same_study_ids()
     if any(
         other_id != protocol_id
+        and other_id not in same_study
         and isinstance(record, Mapping)
         and str(record.get("name", "")).casefold() == protocol_name.casefold()
         for other_id, record in published.items()
@@ -897,15 +958,28 @@ def publish_current_protocol() -> tuple[bool, str]:
     snapshot.trial_title = protocol_name
     snapshot.protocol_id = None
     try:
-        review_store.publish(protocol_id, protocol_name, snapshot)
+        missing, fingerprint = acknowledgment_context(
+            guide, st.session_state.get("pipeline_result"), protocol_id
+        )
+        review_store.publish(
+            protocol_id, protocol_name, snapshot,
+            missing_categories=missing, acknowledgment_fingerprint=fingerprint,
+        )
         review_store.log_action(
             protocol_id, "published", f"{len(snapshot.all_items())} statement(s)"
         )
-    except (sqlite3.Error, OSError) as exc:
+    except review_store.AcknowledgmentError as exc:
+        return False, str(exc)
+    except (sqlite3.Error, OSError, version_store.VersionError) as exc:
         return False, f"Publishing failed; nothing was changed for patients: {exc}"
+    version = version_store.get_version(protocol_id) or {}
+    for older in same_study:
+        published.pop(older, None)  # superseded in the database by this publication
     published[protocol_id] = {
         "name": protocol_name,
         "guide": snapshot,
+        "version_label": version.get("version_label"),
+        "published_at": version.get("published_at"),
     }
     st.session_state["published_protocols"] = published
     persist_review()
@@ -961,11 +1035,15 @@ def sync_published_from_store() -> None:
                 and not (
                     current.get("name") == record["name"]
                     and current.get("guide") == record["guide"]
+                    and current.get("version_label") == record["version_label"]
+                    and current.get("published_at") == record["published_at"]
                 )
             ):
                 published[protocol_id] = {
                     "name": record["name"],
                     "guide": record["guide"],
+                    "version_label": record["version_label"],
+                    "published_at": record["published_at"],
                 }
                 changed = True
         elif published.pop(protocol_id, None) is not None:
@@ -974,46 +1052,104 @@ def sync_published_from_store() -> None:
         st.session_state["published_protocols"] = published
 
 
-def restore_last_draft() -> bool:
-    """
-    Reopen the most recently saved review after a restart or refresh.
-
-    Only runs when the coordinator has nothing open, and never replaces
-    anything that is already in the session.
-    """
-    if (
-        st.session_state.get("pipeline_result") is not None
-        or st.session_state.get("coordinator_protocol_id")
-        or active_analysis_job() is not None
-    ):
-        return False
+def _remember_saved_names() -> None:
+    """Make saved protocol names known so a duplicate name is caught."""
     try:
-        draft = review_store.load_latest_draft()
         names = review_store.draft_names()
     except (sqlite3.Error, OSError):
-        return False
+        return
     protocols = st.session_state.setdefault("coordinator_protocols", {})
     for saved_id, saved_name in names.items():
         protocols.setdefault(saved_id, {"name": saved_name})
-    if draft is None or draft["pipeline"] is None:
-        return False
-    protocol_id = draft["protocol_id"]
-    protocols[protocol_id] = {
-        "name": draft["name"],
-        "fingerprint": draft["upload_fingerprint"],
-        "uploaded_name": draft["uploaded_name"],
-    }
-    purge_item_widget_state()
-    st.session_state.pipeline_result = draft["pipeline"]
-    st.session_state.coordinator_protocol_id = protocol_id
-    st.session_state.uploaded_name = draft["uploaded_name"]
-    st.session_state.uploaded_fingerprint = draft["upload_fingerprint"]
-    st.session_state[GUIDE_KEY] = draft["guide"]
-    st.session_state[GUIDE_SOURCE_KEY] = analysis_fingerprint(draft["pipeline"])
-    st.session_state["coord_max_step"] = len(STEPS) - 1
-    st.session_state["_coord_goto"] = STEPS[2]
-    st.session_state["_draft_restored"] = draft["name"] or draft["uploaded_name"] or "your protocol"
-    return True
+
+
+def _show_coordinator_view(view: str) -> None:
+    """Switch between dashboard, protocol list and workflow."""
+    st.session_state[COORD_VIEW_KEY] = view
+    step = st.session_state.get("coord_step", STEPS[0])
+    record_page_visit(
+        coordinator_page(
+            step if step in STEPS else STEPS[0],
+            st.session_state.get("coord_max_step", 0),
+            view,
+        )
+    )
+
+
+def start_new_protocol(study_id: Optional[str] = None, label: Optional[str] = None) -> None:
+    """
+    Open the workflow empty. Saved protocols and analysis caches are untouched.
+
+    With a study id, the upload becomes a new version of that study.
+    """
+    clear_analysis_state(keep_upload=False)
+    st.session_state["coord_study_id"] = study_id
+    st.session_state["coord_version_label"] = label or version_store.DEFAULT_LABEL
+    reset_upload_widget()
+    st.session_state["_coord_goto"] = STEPS[0]
+    st.session_state.pop("_draft_restored", None)
+    st.session_state.pop("_open_notice", None)
+    _remember_saved_names()
+    _show_coordinator_view(VIEW_WORKFLOW)
+
+
+def open_saved_protocol(protocol_id: str) -> bool:
+    """
+    Load one saved protocol into the workflow without running any analysis.
+
+    Only stored data is loaded. When the saved analysis is missing the
+    workflow opens empty with an explanation instead of reusing another
+    protocol's results.
+    """
+    clear_analysis_state(keep_upload=False)
+    reset_upload_widget()
+    st.session_state.pop("_draft_restored", None)
+    st.session_state.pop("_open_notice", None)
+    st.session_state["coord_study_id"] = None
+    st.session_state["coord_version_label"] = version_store.DEFAULT_LABEL
+    _remember_saved_names()
+    try:
+        draft = review_store.load_draft(protocol_id)
+    except (sqlite3.Error, OSError):
+        draft = None
+    st.session_state["_coord_goto"] = STEPS[0]
+    label = ""
+    if draft is not None:
+        label = draft["name"] or draft["uploaded_name"] or "this protocol"
+    if draft is None:
+        st.session_state["_open_notice"] = (
+            "error",
+            "That protocol could not be read from the database.",
+        )
+    elif draft["pipeline"] is None:
+        st.session_state["_open_notice"] = (
+            "warning",
+            f"The analysis for **{label}** was not saved, so its summary and "
+            "statements cannot be reopened. Its saved record is unchanged. "
+            "Upload the PDF again to analyze it as a new protocol.",
+        )
+    else:
+        protocols = st.session_state.setdefault("coordinator_protocols", {})
+        protocols[protocol_id] = {
+            "name": draft["name"],
+            "fingerprint": draft["upload_fingerprint"],
+            "uploaded_name": draft["uploaded_name"],
+        }
+        version = version_store.get_version(protocol_id)
+        if version:
+            st.session_state["coord_study_id"] = version["study_id"]
+            st.session_state["coord_version_label"] = version["version_label"]
+        st.session_state.pipeline_result = draft["pipeline"]
+        st.session_state.coordinator_protocol_id = protocol_id
+        st.session_state.uploaded_name = draft["uploaded_name"]
+        st.session_state.uploaded_fingerprint = draft["upload_fingerprint"]
+        st.session_state[GUIDE_KEY] = draft["guide"]
+        st.session_state[GUIDE_SOURCE_KEY] = analysis_fingerprint(draft["pipeline"])
+        st.session_state["coord_max_step"] = len(STEPS) - 1
+        st.session_state["_coord_goto"] = STEPS[2]
+        st.session_state["_draft_restored"] = label
+    _show_coordinator_view(VIEW_WORKFLOW)
+    return draft is not None and draft["pipeline"] is not None
 
 
 def _need_analysis() -> bool:
@@ -1059,6 +1195,44 @@ def adopt_upload(uploaded: Any, fingerprint: str) -> None:
     st.session_state.uploaded_fingerprint = fingerprint
     st.session_state.coordinator_protocol_id = uuid.uuid4().hex
     st.session_state.coord_max_step = 0
+    st.session_state.pop("_open_notice", None)
+    study_id = st.session_state.get("coord_study_id")
+    if study_id:
+        # A new version defaults to the study's title as its protocol name.
+        try:
+            title = version_store.study_title(study_id)
+        except (sqlite3.Error, OSError):
+            title = None
+        if title:
+            st.session_state.setdefault("coordinator_protocols", {})[
+                st.session_state.coordinator_protocol_id
+            ] = {"name": title, "fingerprint": fingerprint, "uploaded_name": uploaded.name}
+
+
+def _render_version_field(protocol_id: str) -> None:
+    """Show (or, for a brand-new trial, choose) the version this upload becomes."""
+    version = version_store.get_version(protocol_id)
+    if version:
+        st.caption(
+            f"Clinical trial: **{version['study_title']}** · Version **{version['version_label']}**"
+        )
+        return
+    study_id = st.session_state.get("coord_study_id")
+    if study_id:
+        st.caption(
+            f"New version of **{version_store.study_title(study_id)}**: "
+            f"Version **{st.session_state.get('coord_version_label')}**"
+        )
+        return
+    key = f"version_input_{protocol_id}"
+    st.text_input(
+        "Version identifier",
+        key=key,
+        value=st.session_state.get("coord_version_label") or version_store.DEFAULT_LABEL,
+        max_chars=20,
+        help=version_store.LABEL_RULES,
+    )
+    st.session_state["coord_version_label"] = st.session_state[key].strip()
 
 
 def reset_upload_widget() -> None:
@@ -1087,12 +1261,24 @@ def render_upload_step() -> None:
                 )
                 if st.button("Save", key="save_protocol_name_btn"):
                     protocol_name = st.session_state[name_key].strip()
+                    label_problem = None
+                    if not version_store.get_version(protocol_id) and not st.session_state.get("coord_study_id"):
+                        try:
+                            version_store.validate_label(
+                                st.session_state.get("coord_version_label") or version_store.DEFAULT_LABEL
+                            )
+                        except version_store.VersionError as exc:
+                            label_problem = str(exc)
                     if not protocol_name:
                         st.warning("Enter a protocol name before saving.")
+                    elif label_problem:
+                        st.warning(label_problem)
                     else:
                         protocols = st.session_state.setdefault("coordinator_protocols", {})
+                        same_study = _same_study_ids()
                         duplicate = any(
                             existing_id != protocol_id
+                            and existing_id not in same_study
                             and record.get("name", "").casefold() == protocol_name.casefold()
                             for existing_id, record in protocols.items()
                         )
@@ -1106,6 +1292,7 @@ def render_upload_step() -> None:
                             }
                             persist_review()
                             st.success(f"Protocol name saved: **{protocol_name}**")
+                _render_version_field(protocol_id)
                 if current_protocol_name():
                     st.caption(f"Saved name: **{current_protocol_name()}**")
             else:
@@ -1237,22 +1424,23 @@ def render_summary_step() -> None:
 
 
 def render_review_step() -> None:
-    """Step 3: mark each generated statement accurate or not, then approve."""
+    """
+    Step 3 — four sections: review statements, add a statement, patient
+    summary (collapsed), publish.
+    """
     if _need_analysis():
         return
     protocol_name = current_protocol_name()
     if protocol_name:
         st.caption(f"Protocol: **{protocol_name}**")
-    publish_col = render_guide_review_tab(st.session_state.pipeline_result)
-    if publish_col is None or get_guide() is None:
+    if not render_guide_review_tab(st.session_state.pipeline_result) or get_guide() is None:
         # Statements are still being generated (or failed): nothing to publish yet.
         return
 
     protocol_id = st.session_state.get("coordinator_protocol_id")
     if protocol_id:
-        st.divider()
-        render_coverage_panel(st.session_state.pipeline_result, get_guide(), protocol_id)
         render_summary_panel(get_guide(), protocol_id)
+        render_version_panel(get_guide(), protocol_id)
 
     guide = get_guide()
     publish_reason = (
@@ -1266,49 +1454,79 @@ def render_review_step() -> None:
         st.info(f"Restored your saved review for **{restored}**.")
 
     record = published_record(protocol_id)
-    # The Publish button sits in the sticky status bar; its messages follow here.
-    with publish_col:
-        publish_clicked = st.button(
-            "Publish to Patient Portal",
-            type="primary",
-            key="publish_protocol_btn",
-            disabled=publish_reason is not None,
-            help=publish_reason,
-            use_container_width=True,
-        )
+    st.divider()
+    _render_missing_categories(guide, protocol_id, version_label_of(protocol_id))
+    publish_clicked = st.button(
+        "Publish to Patient Portal",
+        type="primary",
+        key="publish_protocol_btn",
+        disabled=publish_reason is not None,
+        help=publish_reason,
+        use_container_width=True,
+    )
     # Only this run's attempt is reported; nothing is carried over between runs.
     attempt = publish_current_protocol() if publish_clicked else None
     if attempt is not None and attempt[0]:
         record = published_record(protocol_id)
     _render_publish_status(guide, protocol_id, protocol_name, publish_reason, record, attempt)
 
-    st.divider()
-    with st.expander("Preview what patients will see", expanded=False):
-        preview = build_published_snapshot(guide)
-        if preview.all_items():
-            st.markdown(guide_to_markdown(preview, approved_only=True, heading_level=3))
-            st.caption(
-                "Only approved statements are shown. Pending, rejected and "
-                "unverified statements are left out."
-            )
-        else:
-            st.caption("Nothing is approved yet, so patients would see nothing.")
-
-    try:
-        events = review_store.history(protocol_id, limit=10)
-    except (sqlite3.Error, OSError):
-        events = []
-    if events:
-        with st.expander("Recent review history", expanded=False):
-            for event in events:
-                st.caption(f"{event['at']} · {event['action']} · {event['detail'] or ''}")
-
-    # Last element of the page, and only for a protocol that is really published.
+    # Only for a protocol that is really published.
     if record is not None and st.button(
         "Preview as a patient", key="preview_patient_btn"
     ):
         navigate_to_page(patient_page(protocol_id))
         st.rerun()
+
+
+ACK_TEXT = (
+    "I have reviewed the missing categories, understand the risks, and accept "
+    "responsibility for publishing this version with incomplete information."
+)
+ACK_KEY = "publish_ack_checkbox"
+
+
+def version_label_of(protocol_id: Optional[str]) -> Optional[str]:
+    return (version_store.get_version(protocol_id) or {}).get("version_label") if protocol_id else None
+
+
+def _set_acknowledgment(protocol_id: str, missing: list[str], fingerprint: str, version: Optional[str]) -> None:
+    """Checkbox callback: store or withdraw the acknowledgment server-side."""
+    try:
+        if st.session_state.get(ACK_KEY):
+            review_store.record_incomplete_acknowledgment(protocol_id, fingerprint, missing, version)
+        else:
+            review_store.clear_incomplete_acknowledgment(protocol_id)
+    except (authz.AuthorizationError, sqlite3.Error, OSError):
+        st.session_state[ACK_KEY] = False
+
+
+def _render_missing_categories(guide: Any, protocol_id: Optional[str], version: Optional[str]) -> None:
+    """Warning and acknowledgment for critical categories with no approved statement."""
+    pipeline_result = st.session_state.get("pipeline_result")
+    if not protocol_id or pipeline_result is None:
+        return
+    try:
+        missing, fingerprint = acknowledgment_context(guide, pipeline_result, protocol_id)
+        acknowledged = review_store.acknowledgment_valid(protocol_id, fingerprint)
+    except (sqlite3.Error, OSError):
+        return
+    if not missing:
+        st.session_state.pop(ACK_KEY, None)
+        return
+    st.warning(
+        "**These required categories have no approved statement:** "
+        + ", ".join(missing)
+        + ". You can publish anyway, but patients will not see this information."
+    )
+    # The stored acknowledgment is the truth: a changed version, statement or
+    # summary makes it invalid, which clears the box.
+    st.session_state[ACK_KEY] = acknowledged
+    st.checkbox(
+        ACK_TEXT,
+        key=ACK_KEY,
+        on_change=_set_acknowledgment,
+        args=(protocol_id, missing, fingerprint, version),
+    )
 
 
 def _render_publish_status(
@@ -1356,15 +1574,249 @@ def _render_publish_status(
         (st.success if unpublished_note[0] else st.error)(unpublished_note[1])
 
 
+def unsaved_work() -> tuple[list[str], list[str]]:
+    """
+    What the coordinator would lose by leaving the current protocol.
+
+    Returns (typed, other). `typed` is text typed into a box but not saved;
+    it disappears as soon as that page is left. `other` is work that stays in
+    the session but is not stored as a protocol (a running analysis, statements
+    being generated, an analysis that has no saved review yet, or an upload that
+    has not been analyzed). Saved protocols are never counted.
+    """
+    typed: list[str] = []
+    other: list[str] = []
+    state = st.session_state
+    protocol_id = state.get("coordinator_protocol_id")
+
+    guide = get_guide()
+    if guide is not None:
+        edits = sum(
+            1
+            for item in guide.all_items()
+            if isinstance(state.get(f"guide_{item.item_id}_text"), str)
+            and state[f"guide_{item.item_id}_text"].strip() != item.plain_text
+        )
+        if edits:
+            typed.append(f"{edits} statement edit(s) you have not saved")
+    if protocol_id:
+        name_value = state.get(f"protocol_name_{protocol_id}")
+        if isinstance(name_value, str) and name_value.strip() != current_protocol_name():
+            typed.append("a protocol name you have not saved")
+        draft_text = state.get(f"summary_unsaved_{protocol_id}")
+        if isinstance(draft_text, str):
+            try:
+                saved = review_store.load_summary(protocol_id)
+            except (sqlite3.Error, OSError):
+                saved = None
+            if saved is None or draft_text.strip() != saved["draft_text"].strip():
+                typed.append("summary edits you have not saved")
+
+    if active_analysis_job() is not None:
+        other.append("an analysis is still running")
+    generating = guide_jobs.jobs.get(state.get(GUIDE_JOB_KEY))
+    if generating is not None and generating.active:
+        other.append("patient statements are still being generated")
+    if state.get("pipeline_result") is not None and protocol_id:
+        try:
+            saved_review = review_store.draft_exists(protocol_id)
+        except (sqlite3.Error, OSError):
+            saved_review = True
+        if not saved_review:
+            other.append(
+                "the analysis has not been saved as a protocol yet "
+                "(open the Review step to save it)"
+            )
+    elif (
+        state.get("uploaded_fingerprint")
+        and state.get("pipeline_result") is None
+        and active_analysis_job() is None
+    ):
+        other.append("a PDF is uploaded but has not been analyzed")
+    return typed, other
+
+
+def _typed_widget_values() -> dict[str, str]:
+    """Text boxes whose typed value differs from what is saved (for 'Stay')."""
+    state = st.session_state
+    values: dict[str, str] = {}
+    guide = get_guide()
+    for item in guide.all_items() if guide is not None else []:
+        key = f"guide_{item.item_id}_text"
+        if isinstance(state.get(key), str) and state[key].strip() != item.plain_text:
+            values[key] = state[key]
+    if state.get("coord_step") in STEPS:
+        values["coord_step"] = state["coord_step"]
+    protocol_id = state.get("coordinator_protocol_id")
+    name_key = f"protocol_name_{protocol_id}"
+    if protocol_id and isinstance(state.get(name_key), str):
+        values[name_key] = state[name_key]
+    return values
+
+
+def _discard_note(typed: list[str], other: list[str]) -> str:
+    items = typed + other
+    return "; ".join(items[:-1]) + (" and " if len(items) > 1 else "") + items[-1]
+
+
+def _leave_workflow_for_home() -> None:
+    """Return to Home. Typed-but-unsaved text is dropped; saved data is untouched."""
+    st.session_state.pop("_nav_pending", None)
+    for key in [k for k in st.session_state if str(k).startswith("summary_unsaved_")]:
+        del st.session_state[key]
+    _show_coordinator_view(VIEW_HOME)
+
+
+def _request_nav(kind: str, protocol_id: str = "", label: str = "") -> None:
+    """Run a navigation now, or ask first when it would lose unsaved work."""
+    typed, other = unsaved_work()
+    if kind == "back":
+        needs_confirm = bool(typed)
+        other = []
+    else:
+        needs_confirm = bool(typed or other)
+    if needs_confirm:
+        st.session_state["_nav_pending"] = {
+            "kind": kind,
+            "protocol_id": protocol_id,
+            "label": label,
+            "typed": typed,
+            "other": other,
+            "restore": _typed_widget_values() if kind == "back" else {},
+        }
+    elif kind == "back":
+        _leave_workflow_for_home()
+    else:
+        _run_switch(kind, protocol_id, label)
+    st.rerun()
+
+
+def _run_switch(kind: str, protocol_id: str, label: str = "") -> None:
+    st.session_state.pop("_nav_pending", None)
+    if kind == "add":
+        start_new_protocol()
+    elif kind == "version":
+        start_new_protocol(protocol_id, label)
+    else:
+        open_saved_protocol(protocol_id)
+
+
+def render_nav_confirmation() -> bool:
+    """Show the pending 'discard unsaved work?' prompt. True when it was shown."""
+    pending = st.session_state.get("_nav_pending")
+    if not pending:
+        return False
+    render_top_bar(COORDINATOR)
+    what = _discard_note(pending["typed"], pending["other"])
+    if pending["kind"] == "back":
+        st.warning(
+            f"You have {what}. Going back to the dashboard discards it. "
+            "Anything already saved is kept."
+        )
+        go_label, stay_label = "Discard it and go back", "Stay on this page"
+    else:
+        target = {
+            "add": "start a new protocol",
+            "version": "start a new version",
+        }.get(pending["kind"], "open another protocol")
+        st.warning(
+            f"Before you {target}: {what}. Continuing discards the current "
+            "working session. Saved protocols and analysis caches are not affected."
+        )
+        go_label, stay_label = "Discard it and continue", "Keep it running"
+    go, stay = st.columns(2)
+    if go.button(go_label, key="nav_confirm_btn"):
+        if pending["kind"] == "back":
+            _leave_workflow_for_home()
+        else:
+            _run_switch(pending["kind"], pending["protocol_id"], pending.get("label", ""))
+        st.rerun()
+    if stay.button(stay_label, key="nav_cancel_btn"):
+        st.session_state.pop("_nav_pending", None)
+        if pending["kind"] != "back":
+            _show_coordinator_view(VIEW_HOME)
+        # Text boxes were not drawn while the prompt showed, so put the typed text back.
+        for key, value in pending.get("restore", {}).items():
+            st.session_state[key] = value
+        st.rerun()
+    return True
+
+
+def render_coordinator_dashboard() -> None:
+    """Home: add a protocol or open a saved one. Shows no analysis or review data."""
+    _show_coordinator_view(VIEW_HOME)
+    render_top_bar(COORDINATOR)
+    typed, other = unsaved_work()
+    resumable = None
+    if other:
+        resumable = st.session_state.get("uploaded_name") or "your upload"
+    action = coordinator_home.render_home(
+        st.session_state.get(NAME_KEY) or "", resumable, _discard_note([], other) if other else ""
+    )
+    if action == coordinator_home.ACTION_RESUME:
+        _show_coordinator_view(VIEW_WORKFLOW)
+        st.rerun()
+    elif action == coordinator_home.ACTION_ADD:
+        _request_nav("add")
+    elif action == coordinator_home.ACTION_VERSION:
+        _show_coordinator_view(VIEW_VERSIONS)
+        st.rerun()
+    elif action == coordinator_home.ACTION_VIEW:
+        _show_coordinator_view(VIEW_LIST)
+        st.rerun()
+
+
+def render_protocol_list_view() -> None:
+    render_top_bar(COORDINATOR)
+    _back_to_dashboard_button("list_back_btn", leave=False)
+    chosen = coordinator_home.render_protocol_list()
+    if chosen is None:
+        return
+    kind, protocol_id = chosen
+    _request_nav(kind, protocol_id)
+
+
+def render_versions_view() -> None:
+    render_top_bar(COORDINATOR)
+    _back_to_dashboard_button("versions_back_btn", leave=False)
+    chosen = coordinator_home.render_version_picker()
+    if chosen is None:
+        return
+    kind, payload = chosen
+    if kind == "version":
+        study_id, _, label = payload.partition("|")
+        _request_nav("version", study_id, label)
+    else:
+        _request_nav(kind)
+
+
+def _back_to_dashboard_button(key: str, *, leave: bool = True) -> None:
+    if st.button("Back to Dashboard", key=key, icon=":material/arrow_back:"):
+        if leave:
+            _request_nav("back")
+        else:
+            _show_coordinator_view(VIEW_HOME)
+            st.rerun()
+
+
 def render_coordinator_workspace() -> None:
     try:
         authz.require_coordinator()
     except authz.AuthorizationError as exc:
         st.error(str(exc))
         return
-    if not st.session_state.get("_draft_restore_done"):
-        st.session_state["_draft_restore_done"] = True
-        restore_last_draft()
+    if render_nav_confirmation():
+        return
+    view = st.session_state.get(COORD_VIEW_KEY)
+    if view == VIEW_LIST:
+        render_protocol_list_view()
+        return
+    if view == VIEW_VERSIONS:
+        render_versions_view()
+        return
+    if view != VIEW_WORKFLOW:
+        render_coordinator_dashboard()
+        return
     goto = st.session_state.pop("_coord_goto", None)
     if goto in STEPS:
         st.session_state["coord_step"] = goto
@@ -1391,12 +1843,16 @@ def render_coordinator_workspace() -> None:
         coordinator_page(current_step, st.session_state["coord_max_step"])
     )
     render_top_bar(COORDINATOR)
+    _back_to_dashboard_button("workflow_back_btn")
 
     name = st.session_state.get(NAME_KEY) or ""
     theme.page_head(
         f"Welcome, {name}" if name else "Coordinator workspace",
         "Upload a document, check what the AI found, then approve what patients will read.",
     )
+    notice = st.session_state.get("_open_notice")
+    if notice:
+        (st.error if notice[0] == "error" else st.warning)(notice[1])
 
     step = st.segmented_control(
         "Step",

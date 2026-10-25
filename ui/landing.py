@@ -17,6 +17,11 @@ NAME_KEY = "user_name"
 HOME_BUTTON_KEY = "home_btn"
 
 COORDINATOR = "coordinator"
+COORD_VIEW_KEY = "coord_view"
+VIEW_HOME = "home"
+VIEW_LIST = "list"
+VIEW_VERSIONS = "versions"
+VIEW_WORKFLOW = "workflow"
 PATIENT = "patient"
 ROLE_LABELS = {COORDINATOR: "Research coordinator", PATIENT: "Patient/caregiver"}
 PAGE_HISTORY_KEY = "page_history"
@@ -27,8 +32,10 @@ def home_page() -> dict[str, object]:
     return {"role": None}
 
 
-def coordinator_page(step: str, max_step: int) -> dict[str, object]:
-    return {"role": COORDINATOR, "step": step, "max_step": max_step}
+def coordinator_page(
+    step: str, max_step: int, view: str = VIEW_WORKFLOW
+) -> dict[str, object]:
+    return {"role": COORDINATOR, "step": step, "max_step": max_step, "view": view}
 
 
 def patient_page(
@@ -52,6 +59,7 @@ def _ensure_page_history() -> None:
 def _restore_page(page: dict[str, object]) -> None:
     st.session_state[ROLE_KEY] = page.get("role")
     if page.get("role") == COORDINATOR:
+        st.session_state[COORD_VIEW_KEY] = page.get("view", VIEW_WORKFLOW)
         st.session_state["coord_step"] = page["step"]
         st.session_state["coord_max_step"] = max(
             st.session_state.get("coord_max_step", 0),
@@ -77,7 +85,11 @@ def record_page_visit(page: dict[str, object]) -> None:
     current = history[index]
     same_page = current.get("role") == page.get("role")
     if page.get("role") == COORDINATOR:
-        same_page = same_page and current.get("step") == page.get("step")
+        same_page = (
+            same_page
+            and current.get("step") == page.get("step")
+            and current.get("view", VIEW_WORKFLOW) == page.get("view", VIEW_WORKFLOW)
+        )
     elif page.get("role") == PATIENT:
         same_page = same_page and current.get("summary") == page.get("summary")
         if page.get("summary"):
@@ -138,7 +150,7 @@ def current_role() -> str | None:
 
 def open_workspace(user: dict) -> None:
     page = (
-        coordinator_page("1 · Upload", 0)
+        coordinator_page("1 · Upload", 0, VIEW_HOME)
         if user["role"] == COORDINATOR
         else patient_page()
     )
@@ -155,7 +167,7 @@ def sign_in(user: dict, token: str) -> None:
 
 def open_profile(user: dict) -> None:
     """Open the profile page in the workspace that matches the account."""
-    navigate_to_page(coordinator_page("1 · Upload", 0) if user["role"] == COORDINATOR else patient_page())
+    navigate_to_page(coordinator_page("1 · Upload", 0, VIEW_HOME) if user["role"] == COORDINATOR else patient_page())
     st.session_state["show_profile"] = True
     st.session_state[NAME_KEY] = user["full_name"]
     st.rerun()
@@ -172,6 +184,7 @@ def sign_out() -> None:
     auth.end_session(st.session_state.pop(authz.TOKEN_KEY, None))
     st.session_state["show_profile"] = False
     st.session_state[NAME_KEY] = ""
+    st.session_state.pop(COORD_VIEW_KEY, None)
     navigate_to_page(home_page())
     st.rerun()
 

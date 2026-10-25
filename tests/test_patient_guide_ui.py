@@ -876,19 +876,25 @@ def test_upload_step_restores_document_and_name_after_navigation():
     assert not at.exception
 
 
-def test_returning_home_and_reopening_coordinator_keeps_progress():
-    at, analyzer, _ = _reviewed_session()
+def test_returning_home_and_reopening_coordinator_lands_on_dashboard_then_reopens_saved():
+    at, analyzer, protocol_id = _reviewed_session()
     before = _progress(at)
 
     at = _click(at, "home_btn")
     assert at.session_state["role"] is None
     at = _click(at, "open_workspace_btn")
 
+    # The dashboard never shows the earlier analysis; the saved protocol is reopened explicitly.
     assert at.session_state["role"] == "coordinator"
-    assert _progress(at) == before
-    at = _click(at, "continue_summary_btn")
-    at = _click(at, "continue_review_btn")
-    assert _progress(at) == before
+    assert at.session_state["coord_view"] == "home"
+    assert not [b for b in at.button if b.key == "continue_summary_btn"]
+    at = _click(at, "home_view_btn")
+    at = _click(at, f"open_protocol_{protocol_id}")
+    assert at.session_state["coord_step"] == "3 · Review"
+    after = _progress(at)
+    assert {k: v for k, v in after.items() if k != "analysis"} == {
+        k: v for k, v in before.items() if k != "analysis"
+    }
     assert not at.button(key="publish_protocol_btn").disabled
     assert analyzer.call_count == 1
 

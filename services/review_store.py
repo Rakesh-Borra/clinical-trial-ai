@@ -23,12 +23,13 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 import functools
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from models.plain_language_models import GuideItem, PatientGuide
 
 PUBLISHED = "published"
 WITHDRAWN = "withdrawn"
+SUPERSEDED = "superseded"
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "ctai.db"
 
@@ -90,6 +91,28 @@ CREATE TABLE IF NOT EXISTS history (
     action TEXT NOT NULL,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS publish_acknowledgments (
+    protocol_id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    missing_json TEXT NOT NULL,
+    user_id TEXT,
+    user_email TEXT,
+    version_label TEXT,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS deletion_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    user_id TEXT,
+    user_email TEXT,
+    scope TEXT NOT NULL,
+    study_id TEXT,
+    study_title TEXT,
+    protocol_ids_json TEXT NOT NULL,
+    version_labels_json TEXT NOT NULL,
+    was_published INTEGER NOT NULL DEFAULT 0,
+    pdf_files_removed INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -123,6 +146,9 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    from services import version_store
+
+    version_store.ensure_schema(conn)
     return conn
 
 
@@ -144,8 +170,18 @@ def save_draft(
     uploaded_name: Optional[str] = None,
     upload_fingerprint: Optional[str] = None,
     pipeline: Optional[Dict[str, Any]] = None,
+    study_id: Optional[str] = None,
+    version_label: Optional[str] = None,
 ) -> None:
-    """Insert or replace the working guide for one protocol."""
+    """
+    Insert or replace the working guide for one protocol.
+
+    The first save also registers the protocol as a version of a study (a new
+    study unless ``study_id`` is given). A duplicate version label in that
+    study raises VersionError and nothing is saved.
+    """
+    from services import version_store
+
     pipeline_json = None
     if pipeline is not None:
         try:
@@ -158,6 +194,10 @@ def save_draft(
         ).fetchone()
         if pipeline_json is None and existing is not None:
             pipeline_json = existing["pipeline_json"]
+        version_store.register_version(
+            conn, protocol_id, title=name, study_id=study_id,
+            label=version_label, pdf_name=uploaded_name,
+        )
         conn.execute(
             """
             INSERT INTO drafts (protocol_id, name, uploaded_name, upload_fingerprint,
@@ -224,6 +264,23 @@ def clear_generated_items(protocol_id: str, keep_fingerprint: Optional[str] = No
         )
 
 
+def _draft_record(row: sqlite3.Row) -> Optional[Dict[str, Any]]:
+    """A saved draft as a dict, or None when its guide cannot be read."""
+    try:
+        guide = PatientGuide.model_validate_json(row["guide_json"])
+    except ValueError:
+        return None
+    return {
+        "protocol_id": row["protocol_id"],
+        "name": row["name"] or "",
+        "uploaded_name": row["uploaded_name"],
+        "upload_fingerprint": row["upload_fingerprint"],
+        "pipeline": _pipeline_from_json(row["pipeline_json"]),
+        "guide": guide,
+        "updated_at": row["updated_at"],
+    }
+
+
 def load_latest_draft() -> Optional[Dict[str, Any]]:
     """The most recently saved draft, or None. Unreadable rows are skipped."""
     with closing(_connect()) as conn:
@@ -231,19 +288,86 @@ def load_latest_draft() -> Optional[Dict[str, Any]]:
             "SELECT * FROM drafts ORDER BY updated_at DESC, rowid DESC"
         ).fetchall()
     for row in rows:
-        try:
-            guide = PatientGuide.model_validate_json(row["guide_json"])
-        except ValueError:
-            continue
-        return {
-            "protocol_id": row["protocol_id"],
-            "name": row["name"] or "",
-            "uploaded_name": row["uploaded_name"],
-            "upload_fingerprint": row["upload_fingerprint"],
-            "pipeline": _pipeline_from_json(row["pipeline_json"]),
-            "guide": guide,
-        }
+        record = _draft_record(row)
+        if record is not None:
+            return record
     return None
+
+
+@_coordinator_only
+def load_draft(protocol_id: str) -> Optional[Dict[str, Any]]:
+    """One saved draft by id, or None when it is missing or unreadable."""
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT * FROM drafts WHERE protocol_id = ?", (protocol_id,)
+        ).fetchone()
+    return _draft_record(row) if row else None
+
+
+@_coordinator_only
+def list_protocols() -> List[Dict[str, Any]]:
+    """
+    Every saved protocol, newest first, with only what is actually stored.
+
+    Each entry has the draft's name, original filename and last-saved time,
+    whether its analysis was saved, its statement guide (None if unreadable),
+    the publication status, whether the summary was approved, and its study
+    and version details.
+    """
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM drafts ORDER BY updated_at DESC, rowid DESC"
+        ).fetchall()
+        published = {
+            r["protocol_id"]: r["status"]
+            for r in conn.execute("SELECT protocol_id, status FROM publications")
+        }
+        approved = {
+            r["protocol_id"]
+            for r in conn.execute(
+                "SELECT protocol_id FROM summaries WHERE approved_text IS NOT NULL"
+            )
+        }
+        versions = {
+            r["protocol_id"]: r
+            for r in conn.execute(
+                "SELECT v.*, s.title AS study_title FROM protocol_versions v "
+                "JOIN studies s USING (study_id)"
+            )
+        }
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        record = _draft_record(row)
+        version = versions.get(row["protocol_id"])
+        out.append(
+            {
+                "study_id": version["study_id"] if version else None,
+                "study_title": version["study_title"] if version else None,
+                "version_label": version["version_label"] if version else None,
+                "is_current": bool(version and version["is_current"]),
+                "published_at": version["published_at"] if version else None,
+                "uploaded_at": version["uploaded_at"] if version else None,
+                "pdf_status": version["pdf_status"] if version else None,
+                "protocol_id": row["protocol_id"],
+                "name": row["name"] or "",
+                "uploaded_name": row["uploaded_name"],
+                "updated_at": row["updated_at"],
+                "has_analysis": bool(record and record["pipeline"] is not None),
+                "guide": record["guide"] if record else None,
+                "publication": published.get(row["protocol_id"]),
+                "summary_approved": row["protocol_id"] in approved,
+            }
+        )
+    return out
+
+
+def draft_exists(protocol_id: str) -> bool:
+    """True when a draft row has been saved for this protocol."""
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM drafts WHERE protocol_id = ?", (protocol_id,)
+        ).fetchone()
+    return row is not None
 
 
 def draft_names() -> Dict[str, str]:
@@ -278,10 +402,114 @@ def _pipeline_from_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
 # Publications
 # ---------------------------------------------------------------------------
 
+class AcknowledgmentError(ValueError):
+    """Publishing with missing categories needs a current coordinator acknowledgment."""
+
+
+def _signed_in_identity() -> tuple[Optional[str], Optional[str]]:
+    from services import authz
+
+    user = authz.current_user() or {}
+    return (str(user["id"]) if user.get("id") is not None else None), user.get("email")
+
+
 @_coordinator_only
-def publish(protocol_id: str, name: str, snapshot: PatientGuide) -> None:
-    """Make a snapshot patient-visible (replaces any earlier version)."""
+def record_incomplete_acknowledgment(
+    protocol_id: str,
+    fingerprint: str,
+    missing: Sequence[str],
+    version_label: Optional[str] = None,
+) -> None:
+    """Remember that the signed-in coordinator accepted publishing without these categories."""
+    user_id, email = _signed_in_identity()
+    at = _now()
     with closing(_connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO publish_acknowledgments (protocol_id, fingerprint, missing_json, "
+            "user_id, user_email, version_label, at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(protocol_id) DO UPDATE SET fingerprint = excluded.fingerprint, "
+            "missing_json = excluded.missing_json, user_id = excluded.user_id, "
+            "user_email = excluded.user_email, version_label = excluded.version_label, "
+            "at = excluded.at",
+            (protocol_id, fingerprint, json.dumps(list(missing)), user_id, email, version_label, at),
+        )
+        conn.execute(
+            "INSERT INTO history (protocol_id, at, action, detail) VALUES (?, ?, ?, ?)",
+            (
+                protocol_id, at, "incomplete_publication_acknowledged",
+                _ack_detail(email, user_id, protocol_id, version_label, missing, at),
+            ),
+        )
+
+
+@_coordinator_only
+def clear_incomplete_acknowledgment(protocol_id: str) -> None:
+    _run("DELETE FROM publish_acknowledgments WHERE protocol_id = ?", (protocol_id,))
+
+
+def load_incomplete_acknowledgment(protocol_id: str) -> Optional[Dict[str, Any]]:
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT * FROM publish_acknowledgments WHERE protocol_id = ?", (protocol_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def acknowledgment_valid(protocol_id: str, fingerprint: str) -> bool:
+    """True when a stored acknowledgment covers exactly this content, version and gap list."""
+    row = load_incomplete_acknowledgment(protocol_id)
+    return bool(row) and row["fingerprint"] == fingerprint
+
+
+def _ack_detail(email, user_id, protocol_id, version_label, missing, at) -> str:
+    return (
+        f"by {email or 'unknown'} (user {user_id or '?'}) | protocol {protocol_id} | "
+        f"version {version_label or '?'} | missing: {'; '.join(missing)} | acknowledged {at}"
+    )
+
+
+@_coordinator_only
+def publish(
+    protocol_id: str,
+    name: str,
+    snapshot: PatientGuide,
+    missing_categories: Sequence[str] = (),
+    acknowledgment_fingerprint: Optional[str] = None,
+) -> None:
+    """
+    Make a snapshot patient-visible and the study's one current version.
+
+    The previous current version of the same study is superseded in the same
+    transaction; its snapshot is kept as history. When critical categories are
+    missing, a stored acknowledgment for exactly this content is required and
+    is written to the audit log with the publication.
+    """
+    from services import version_store
+
+    with closing(_connect()) as conn, conn:
+        if missing_categories:
+            ack = conn.execute(
+                "SELECT * FROM publish_acknowledgments WHERE protocol_id = ?", (protocol_id,)
+            ).fetchone()
+            if (
+                ack is None
+                or not acknowledgment_fingerprint
+                or ack["fingerprint"] != acknowledgment_fingerprint
+                or json.loads(ack["missing_json"]) != list(missing_categories)
+            ):
+                raise AcknowledgmentError(
+                    "Missing categories must be acknowledged for this version before publishing."
+                )
+            conn.execute(
+                "INSERT INTO history (protocol_id, at, action, detail) VALUES (?, ?, ?, ?)",
+                (
+                    protocol_id, _now(), "published_with_missing_categories",
+                    _ack_detail(
+                        ack["user_email"], ack["user_id"], protocol_id,
+                        ack["version_label"], missing_categories, ack["at"],
+                    ),
+                ),
+            )
         conn.execute(
             """
             INSERT INTO publications (protocol_id, name, guide_json, status,
@@ -296,6 +524,7 @@ def publish(protocol_id: str, name: str, snapshot: PatientGuide) -> None:
             """,
             (protocol_id, name, snapshot.model_dump_json(), PUBLISHED, _now()),
         )
+        version_store.promote(conn, protocol_id, name)
 
 
 @_coordinator_only
@@ -307,6 +536,10 @@ def unpublish(protocol_id: str) -> bool:
             "WHERE protocol_id = ? AND status = ?",
             (WITHDRAWN, _now(), protocol_id, PUBLISHED),
         )
+        if cursor.rowcount > 0:
+            from services import version_store
+
+            version_store.demote(conn, protocol_id)
         return cursor.rowcount > 0
 
 
@@ -326,7 +559,10 @@ def load_publications() -> Dict[str, Dict[str, Any]]:
     patients.
     """
     with closing(_connect()) as conn:
-        rows = conn.execute("SELECT * FROM publications").fetchall()
+        rows = conn.execute(
+            "SELECT p.*, v.version_label, v.published_at AS version_published_at "
+            "FROM publications p LEFT JOIN protocol_versions v USING (protocol_id)"
+        ).fetchall()
     result: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         try:
@@ -337,6 +573,8 @@ def load_publications() -> Dict[str, Dict[str, Any]]:
             "name": row["name"],
             "guide": guide,
             "status": row["status"],
+            "version_label": row["version_label"],
+            "published_at": row["published_at"] or row["version_published_at"],
         }
     return result
 

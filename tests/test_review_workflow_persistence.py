@@ -11,7 +11,7 @@ from agents.plain_language_agent import (
 from app import publish_block_reason
 from services import review_store
 from tests.publish_helpers import gk
-from services.guide_review import PENDING, review_state
+from services.guide_review import PENDING, build_published_snapshot, review_state
 from tests.test_patient_guide_ui import (
     APP_PATH,
     _approved_guide,
@@ -179,15 +179,15 @@ def test_republish_replaces_record_without_duplicates():
     assert len(review_store.history("protocol-eight", 50)) >= 2
 
 
-def test_publish_preview_shows_only_approved_statements():
+def test_published_snapshot_contains_only_approved_statements():
     result = _eight_statement_result()
     guide = _approved_guide(result)
     hidden = guide.all_items()[-1]
     hidden.approved = False
-    at = _prepare_review_app(result, guide)
-    preview = " ".join(m.value for m in at.markdown)
-    assert guide.all_items()[0].plain_text in preview
-    assert hidden.plain_text not in preview
+    snapshot = build_published_snapshot(guide)
+    texts = [i.plain_text for i in snapshot.all_items()]
+    assert guide.all_items()[0].plain_text in texts
+    assert hidden.plain_text not in texts
 
 
 def test_patient_side_uses_latest_published_version():
@@ -217,7 +217,11 @@ def test_review_edits_survive_restart():
     at = _edit_first(at, NEW_TEXT)
 
     fresh = AppTest.from_file(APP_PATH, default_timeout=30)
-    fresh = _as(fresh, "coordinator").run()
+    fresh = _as(fresh, "coordinator")
+    fresh.session_state["coord_view"] = "home"
+    fresh = _click(fresh.run(), "home_view_btn")
+    assert fresh.session_state.get("patient_guide") is None
+    fresh = _click(fresh, "open_protocol_protocol-eight")
     guide = fresh.session_state["patient_guide"]
     assert _first(guide).plain_text == NEW_TEXT
     assert review_state(_first(guide)) == PENDING

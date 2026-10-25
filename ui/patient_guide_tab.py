@@ -10,6 +10,7 @@ Streamlit screens for the Plain-Language Patient Guide.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sqlite3
 import time
@@ -43,16 +44,14 @@ from agents.plain_language_agent import (
 )
 from models.patient_models import PatientAnswer
 from models.plain_language_models import GuideItem, PatientGuide, page_label
-from services import benchmark_log, guide_jobs, review_store
+from services import benchmark_log, guide_jobs, review_store, version_store
 from services.guide_review import (
     ALL,
     APPROVED,
     EDITED,
-    FILTERS,
     PENDING,
     REJECTED,
     edit_problems,
-    matches_filter,
     patient_visible_guide,
     reconsider_item,
     review_state,
@@ -61,14 +60,16 @@ from services.guide_review import (
 from services.model_provider import provider_display_name
 from services.source_inspector import inspect_source
 from services.source_verifier import verify_saved_pages
+from services.manual_statements import SECTION_ATTR
 from ui import theme
+from ui.add_statement import render_add_statement
 
 GUIDE_KEY = "patient_guide"
 GUIDE_SOURCE_KEY = "patient_guide_source"
 GUIDE_JOB_KEY = "guide_job_id"
 GUIDE_ERROR_KEY = "guide_generation_error"
 GUIDE_AUTOSTART_KEY = "guide_autostart_fingerprint"
-GUIDE_FILTER_KEY = "guide_filter"
+MANUAL_KEEP_KEY = "guide_manual_keep"
 
 _TERM_DISCLAIMER = (
     "This is a general definition, not medical advice. Ask the study team "
@@ -160,6 +161,25 @@ def purge_item_widget_state() -> None:
         del st.session_state[key]
 
 
+def _store_original_pdf(protocol_id: str) -> None:
+    """Keep the uploaded PDF with its version (once, with an integrity hash)."""
+    path = st.session_state.get("temp_pdf_path")
+    version = version_store.get_version(protocol_id)
+    if (
+        not path
+        or not os.path.isfile(path)
+        or version is None
+        or version["pdf_status"] == version_store.PDF_STORED
+    ):
+        return
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+        version_store.attach_pdf(protocol_id, data, st.session_state.get("uploaded_name") or "")
+    except (version_store.VersionError, OSError) as exc:
+        st.warning(f"The original PDF could not be stored with this version: {exc}")
+
+
 def persist_review(action: str = "", detail: str = "") -> bool:
     """
     Save the working guide to SQLite, optionally logging a coordinator action.
@@ -180,9 +200,15 @@ def persist_review(action: str = "", detail: str = "") -> bool:
             uploaded_name=st.session_state.get("uploaded_name"),
             upload_fingerprint=st.session_state.get("uploaded_fingerprint"),
             pipeline=st.session_state.get("pipeline_result"),
+            study_id=st.session_state.get("coord_study_id"),
+            version_label=st.session_state.get("coord_version_label"),
         )
+        _store_original_pdf(protocol_id)
         if action:
             review_store.log_action(protocol_id, action, detail)
+    except version_store.VersionError as exc:
+        st.error(f"Your change was not saved: {exc}")
+        return False
     except (sqlite3.Error, OSError) as exc:
         st.error(f"Your change could not be saved to the database: {exc}")
         return False
@@ -311,6 +337,8 @@ def _sync_generated(pipeline_result: Mapping[str, Any], fingerprint: str) -> Opt
         guide = new_guide_shell(analysis, count_statements(analysis), False)
         st.session_state[GUIDE_KEY] = guide
         st.session_state[GUIDE_SOURCE_KEY] = fingerprint
+        for kept in st.session_state.pop(MANUAL_KEEP_KEY, []):
+            getattr(guide, SECTION_ATTR[kept.section]).items.append(kept)
     was_complete = guide.generation_complete
     if merge_generated(guide, analysis, stored):
         done = guide.generation_complete and not was_complete
@@ -439,6 +467,11 @@ def _status_chip(item: GuideItem, published: Optional[set[str]] = None) -> str:
     return theme.chip("Pending · waiting for your decision", "grey")
 
 
+def _restore_text(widget_key: str, saved_text: str) -> None:
+    """Discard an unsaved edit (runs as a callback, before the widget is drawn)."""
+    st.session_state[widget_key] = saved_text
+
+
 def _render_review_item(
     item: GuideItem,
     key: str,
@@ -448,12 +481,14 @@ def _render_review_item(
     with st.container(border=True):
         page = f"Protocol {page_label(item)}" if item.source_page else "Page not found"
         count = f"Statement {number} of {total} · " if number else ""
+        count += "Added by coordinator · " if item.added_by_coordinator else ""
         st.html(
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">'
             f'<span class="ctai-label" style="margin:0">{count}{theme.e(_SECTION_LABEL.get(item.section, item.section))} · {theme.e(page)}</span>'
             f'{_status_chip(item, _published_texts())}</div>'
         )
-        st.html(f'<div class="ctai-label">What the protocol says</div><div class="ctai-quote">{theme.e(item.original_text)}</div>')
+        if not item.added_by_coordinator:
+            st.html(f'<div class="ctai-label">What the protocol says</div><div class="ctai-quote">{theme.e(item.original_text)}</div>')
         st.html(f'<div class="ctai-label">What patients would read</div><div class="ctai-plain">{theme.e(item.plain_text)}</div>')
 
         state = review_state(item)
@@ -473,8 +508,16 @@ def _render_review_item(
             )
             unsaved_edit = new_text.strip() != saved_text
             if unsaved_edit:
-                st.caption("You have unsaved changes. Click **Save edit** to keep them.")
-            if st.button("Save edit", key=f"{key}_save"):
+                st.caption("You have unsaved changes. Click **Save Changes** to keep them, or Cancel to discard.")
+            save_col, cancel_col, _ = st.columns([1, 1, 3])
+            cancel_col.button(
+                "Cancel",
+                key=f"{key}_cancel",
+                disabled=not unsaved_edit,
+                on_click=_restore_text,
+                args=(f"{key}_text", saved_text),
+            )
+            if save_col.button("Save Changes", key=f"{key}_save"):
                 if not new_text.strip():
                     st.session_state[f"{key}_msg"] = ("error", "The statement cannot be empty.")
                 elif not unsaved_edit:
@@ -621,35 +664,36 @@ def _recheck_guide(pipeline_result: Mapping[str, Any], guide: PatientGuide) -> i
 
 
 def _render_verification_details(
-    item: GuideItem, key: str, warnings: list[str], expanded: bool
+    item: GuideItem, key: str, warnings: list[str], expanded: bool = False
 ) -> None:
-    """AI verification results: information for the coordinator, not a decision."""
+    """
+    Only problems are shown: failed or missing verification, unsupported claims
+    and overrides. Routine passes stay in the backend (results, citations and
+    audit records are unchanged).
+    """
     if warnings:
         st.html(
             '<div class="ctai-check bad">⚠️ AI verification found '
             f"{len(warnings)} warning(s). This is information; the decision is yours.</div>"
         )
-    else:
-        st.html('<div class="ctai-check ok">✔ AI verification passed: numbers kept, no medical advice or eligibility wording, source confirmed</div>')
-    with st.expander("AI verification details", expanded=expanded):
+    elif item.source_status != "verified":
         label = {
-            "verified": "Verified against the cited protocol page",
             "unverified": "Not verified against the cited protocol page",
             "unchecked": "Not yet checked against the protocol source",
-        }[item.source_status]
-        st.caption(f"Source check: {label}")
-        for warning in warnings:
-            st.html(f'<div class="ctai-check bad">⚠️ {theme.e(warning)}</div>')
-        for note in item.review_reasons:
-            if note not in warnings and note != REJECTED_REASON:
-                st.caption(f"AI note: {note}")
-        if item.override:
-            st.html(
-                '<div class="ctai-check bad">Human override: '
-                f"{theme.e(item.override_reason or '')}</div>"
-            )
-        if item.source_status != "verified":
-            _render_source_panel(item, key)
+        }.get(item.source_status, "Source not verified")
+        st.html(f'<div class="ctai-check bad">⚠️ {theme.e(label)}</div>')
+    for warning in warnings:
+        st.html(f'<div class="ctai-check bad">⚠️ {theme.e(warning)}</div>')
+    for note in item.review_reasons:
+        if note not in warnings and note != REJECTED_REASON and item.source_status != "verified":
+            st.caption(f"AI note: {note}")
+    if item.override:
+        st.html(
+            '<div class="ctai-check bad">Human override: '
+            f"{theme.e(item.override_reason or '')}</div>"
+        )
+    if item.source_status != "verified":
+        _render_source_panel(item, key)
 
 
 def _render_source_panel(item: GuideItem, key: str) -> None:
@@ -677,23 +721,6 @@ def _render_source_panel(item: GuideItem, key: str) -> None:
         "save; or approve it as a recorded override. Statements are never "
         "marked verified automatically."
     )
-
-
-def _render_filters(counts: dict[str, int]) -> str:
-    """Filter buttons with live counts; returns the selected filter key."""
-    selected = st.session_state.get(GUIDE_FILTER_KEY, ALL)
-    if selected not in dict(FILTERS):
-        selected = ALL
-    with st.container(key="guide_filters", horizontal=True, gap="small"):
-        for filter_key, label in FILTERS:
-            if st.button(
-                f"{label} ({counts[filter_key]})",
-                key=f"guide_filter_{filter_key}",
-                type="primary" if filter_key == selected else "secondary",
-            ):
-                st.session_state[GUIDE_FILTER_KEY] = filter_key
-                st.rerun()
-    return selected
 
 
 def _render_override_confirmation(guide: PatientGuide) -> None:
@@ -725,17 +752,16 @@ def _render_override_confirmation(guide: PatientGuide) -> None:
         st.rerun()
 
 
-def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> Optional[Any]:
+def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
     """
-    Coordinator screen: statements are generated on entry, then reviewed.
+    Sections 1 and 2 of the Review page: review each statement, then add one.
 
-    Statements use the full page width under a sticky review-status bar. The
-    column reserved for the Publish button is returned so the caller can fill
-    it with the existing publication action.
+    Statements use the full page width under a compact status bar. Returns
+    False while the statements are not available yet.
     """
     guide = _ensure_guide(pipeline_result)
     if guide is None:
-        return None
+        return False
 
     counts = state_counts(guide)
     total = counts[ALL]
@@ -744,10 +770,6 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> Optional[Any]
     pending = counts[PENDING]
     accepted = counts[APPROVED] + counts[EDITED]
     rejected = counts[REJECTED]
-    unverified = sum(
-        1 for item in guide.all_items()
-        if item.source_status != "verified" and not item.rejected
-    )
     needs_source_check = any(
         item.source_status == "unchecked" for item in guide.all_items()
     )
@@ -764,9 +786,7 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> Optional[Any]
     # Sticky review-status bar: live counts on the left, actions on the right.
     bar = st.container(key="review_bar")
     with bar:
-        stats, approve_col, publish_col = st.columns(
-            [6, 1.7, 2.3], vertical_alignment="center"
-        )
+        stats, approve_col = st.columns([6, 2], vertical_alignment="center")
         total_text = f"{total} / {expected}" if generating else str(total)
         cells = [
             ("Total", total_text, ""),
@@ -831,99 +851,69 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> Optional[Any]
         st.html(f'<div class="ctai-rbar-progress"><div style="width:{pct}%"></div></div>')
 
     st.caption(
-        "The AI rewrites each protocol statement in plain language and runs "
-        "automatic checks, shown as verification details. You decide on every "
-        "statement: approve, edit and approve, or reject. Approving over a "
-        "verification warning needs your reason and is recorded as a human "
-        "override. Rejected statements stay here for audit but are never shown "
-        "to patients."
+        "Approve, edit or reject each statement. Rejected statements are never "
+        "shown to patients."
     )
-    if guide.analysis_complete is not True:
-        st.warning(
-            "The analysis did not finish cleanly, so publication is blocked. "
-            "You can still review every statement."
-        )
-    if unverified:
-        st.caption(
-            f"{unverified} statement(s) have AI source-verification warnings "
-            "(see each statement's AI verification details)."
-        )
-    if needs_source_check:
-        if pipeline_result.get("source_pages") or pipeline_result.get("verification"):
-            if st.button("🔎 Recheck sources", key="guide_recheck_btn"):
-                resolved = _recheck_guide(pipeline_result, guide)
-                if persist_review("source_rechecked", f"{resolved} statement(s)"):
-                    st.session_state["guide_recheck_msg"] = (
-                        f"Source check ran: {resolved} statement(s) changed status."
-                    )
-                st.rerun()
-        else:
-            st.caption(
-                "Re-run the protocol analysis (cached results are reused) to "
-                "provide the current source text for the AI source check."
-            )
+    if generating:
+        st.caption("Statements are still being generated. Publishing waits until they finish.")
     message = st.session_state.pop("guide_recheck_msg", None)
     if message:
         st.info(message)
-    if generating:
-        st.caption(
-            "Generation is still running or incomplete: publication stays "
-            "blocked until every statement exists and has a decision."
-        )
-    if pending:
-        st.info(f"{pending} statement(s) still need your decision.")
-    if not pending and not generating:
-        if accepted:
-            st.success(
-                f"Every statement has a decision: {accepted} to publish, "
-                f"{rejected} rejected. Rejected statements are never shown to patients."
-            )
-        else:
-            st.warning("Every statement is rejected. Approve at least one to publish.")
     _render_override_confirmation(guide)
-
-    b2, b3, _ = st.columns([1, 1, 2])
-    b2.download_button(
-        "Download guide (Markdown)",
-        data=guide_to_markdown(patient_visible_guide(guide)),
-        file_name="patient_guide.md",
-        mime="text/markdown",
-        key="guide_download_btn",
-    )
-    if b3.button("Regenerate guide", key="guide_regenerate_btn"):
-        try:
-            review_store.clear_generated_items(_store_id())
-        except (sqlite3.Error, OSError):
-            pass
-        clear_guide()
-        st.rerun()
-
-    selected = _render_filters(counts)
-    if counts[selected] == 0 and selected != ALL:
-        st.caption("No statements match this filter.")
 
     number = 0
     for section in guide.sections():
-        visible = [i for i in section.items if matches_filter(i, selected)]
-        if not visible and section.items:
-            number += len(section.items)
-            continue
-        if selected != ALL and not section.items:
-            continue
         st.subheader(section.title)
         if section.unavailable_message:
+            number += len(section.items)
             st.caption(section.unavailable_message)
             continue
         for item in section.items:
             number += 1
-            if matches_filter(item, selected):
-                _render_review_item(
-                    item,
-                    key=f"guide_{item.item_id}",
-                    number=number,
-                    total=total,
+            _render_review_item(
+                item,
+                key=f"guide_{item.item_id}",
+                number=number,
+                total=total,
+            )
+
+    render_add_statement(guide, pipeline_result, persist_review)
+
+    with st.expander("More options", expanded=False):
+        if needs_source_check:
+            if pipeline_result.get("source_pages") or pipeline_result.get("verification"):
+                if st.button("🔎 Recheck sources", key="guide_recheck_btn"):
+                    resolved = _recheck_guide(pipeline_result, guide)
+                    if persist_review("source_rechecked", f"{resolved} statement(s)"):
+                        st.session_state["guide_recheck_msg"] = (
+                            f"Source check ran: {resolved} statement(s) changed status."
+                        )
+                    st.rerun()
+            else:
+                st.caption(
+                    "Re-run the protocol analysis (cached results are reused) to "
+                    "provide the current source text for the AI source check."
                 )
-    return publish_col
+        st.download_button(
+            "Download guide (Markdown)",
+            data=guide_to_markdown(patient_visible_guide(guide)),
+            file_name="patient_guide.md",
+            mime="text/markdown",
+            key="guide_download_btn",
+        )
+        if st.button("Regenerate guide", key="guide_regenerate_btn"):
+            try:
+                review_store.clear_generated_items(_store_id())
+            except (sqlite3.Error, OSError):
+                pass
+            # Statements typed in by the coordinator are not AI output: keep them.
+            st.session_state[MANUAL_KEEP_KEY] = [
+                i for i in guide.all_items() if i.added_by_coordinator
+            ]
+            clear_guide()
+            st.rerun()
+        st.caption("Regenerating replaces the AI statements and their decisions; statements you added are kept.")
+    return True
 
 
 # ---------------------------------------------------------------------------

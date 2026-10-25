@@ -82,28 +82,35 @@ def render_coverage_panel(
                         st.rerun()
 
 
+def _discard_summary_edit(widget_key: str, unsaved_key: str, saved: str) -> None:
+    """Cancel Edits: back to the last saved draft (runs before widgets are drawn)."""
+    st.session_state[widget_key] = saved
+    st.session_state.pop(unsaved_key, None)
+
+
 def render_summary_panel(guide: PatientGuide, protocol_id: str) -> None:
-    """View, edit, save, review changes and approve the patient summary."""
-    st.subheader("Patient summary")
+    """Section 3: view, edit, save and approve the patient summary (collapsed)."""
     try:
         record = review_store.load_summary(protocol_id)
     except sqlite3.Error as exc:
         st.error(f"The summary could not be loaded: {exc}")
         return
 
-    if record is None:
-        st.info(
-            "No patient summary has been generated yet. Go to **Step 2 — "
-            "Summary** and click **Generate summary**; it will appear here "
-            "for your review."
-        )
-        return
+    with st.expander("Patient Summary", expanded=False):
+        if record is None:
+            st.info(
+                "No patient summary has been generated yet. Go to **Step 2 — "
+                "Summary** and click **Generate summary**; it will appear here "
+                "for your review."
+            )
+            return
 
-    approved = is_summary_approved(record)
-    st.markdown("**Status:** " + ("✅ Approved" if approved else "📝 Not approved yet"))
-    st.markdown(format_summary_markdown(record["draft_text"]))
+        approved = is_summary_approved(record)
+        saved_note = st.session_state.pop(f"summary_saved_{protocol_id}", None)
+        if saved_note:
+            st.success(saved_note)
+        st.markdown("**Status:** " + ("✅ Approved" if approved else "📝 Not approved yet"))
 
-    with st.expander("Edit summary", expanded=False):
         # Typed-but-unsaved text lives in a plain session key so it survives
         # reruns and leaving the page (widget state is dropped when the widget
         # is not drawn).
@@ -116,60 +123,69 @@ def render_summary_panel(guide: PatientGuide, protocol_id: str) -> None:
         edited = st.text_area(
             "Summary text",
             value=st.session_state.get(unsaved_key, record["draft_text"]),
-            height=240,
+            height=260,
             key=widget_key,
             on_change=_remember_unsaved,
+            label_visibility="collapsed",
         )
-        if edited.strip() != record["draft_text"].strip():
-            st.caption("You have unsaved changes. Click **Save draft** to keep them.")
-        c1, c2 = st.columns(2)
-        if c1.button("Save draft", key="summary_save_btn"):
+        unsaved = edited.strip() != record["draft_text"].strip()
+        if unsaved:
+            st.caption("You have unsaved changes. Save Changes to keep them, or Cancel Edits.")
+        save_col, cancel_col, revert_col = st.columns(3)
+        if save_col.button("Save Changes", key="summary_save_btn", disabled=not unsaved):
+            authz.require_coordinator()
             if not edited.strip():
                 st.error("The summary cannot be empty.")
             elif review_store.save_summary_draft(protocol_id, edited.strip()):
                 st.session_state.pop(unsaved_key, None)
+                st.session_state[f"summary_saved_{protocol_id}"] = (
+                    "Summary saved. It needs to be approved again before publishing."
+                )
                 st.rerun()
-            else:
-                st.session_state.pop(unsaved_key, None)
-                st.info("No changes to save.")
-        if c2.button("Revert to AI original", key="summary_revert_btn"):
+        cancel_col.button(
+            "Cancel Edits",
+            key="summary_cancel_btn",
+            disabled=not unsaved,
+            on_click=_discard_summary_edit,
+            args=(widget_key, unsaved_key, record["draft_text"]),
+        )
+        if revert_col.button("Revert to AI original", key="summary_revert_btn"):
             st.session_state.pop(unsaved_key, None)
             if review_store.save_summary_draft(protocol_id, record["original_text"]):
                 st.rerun()
 
-    diff = change_diff(record["original_text"], record["draft_text"])
-    with st.expander("Review changes from the AI original", expanded=False):
-        if diff:
-            st.code("\n".join(diff), language="diff")
+        # Claims in the saved draft that the approved statements do not support.
+        for problem in validate_summary(record["draft_text"], guide):
+            st.warning(problem)
+
+        block = summary_approval_block_reason(record, guide)
+        if approved:
+            if st.button("Withdraw summary approval", key="summary_unapprove_btn"):
+                review_store.withdraw_summary_approval(protocol_id)
+                st.rerun()
         else:
-            st.caption("No changes: the draft matches the AI original.")
+            if st.button(
+                "Approve summary", key="summary_approve_btn", type="primary",
+                disabled=block is not None or unsaved,
+            ):
+                authz.require_coordinator()
+                review_store.approve_summary(protocol_id)
+                st.rerun()
+            if unsaved:
+                st.caption("Save your changes before approving, so the approved text is the text you reviewed.")
+            elif block:
+                st.caption("Cannot approve yet: " + block)
 
-    problems = validate_summary(record["draft_text"], guide)
-    for problem in problems:
-        st.warning(problem)
-
-    block = summary_approval_block_reason(record, guide)
-    if approved:
-        if st.button("Withdraw summary approval", key="summary_unapprove_btn"):
-            review_store.withdraw_summary_approval(protocol_id)
-            st.rerun()
-    else:
-        unsaved = edited.strip() != record["draft_text"].strip()
-        if st.button(
-            "Approve summary", key="summary_approve_btn", type="primary",
-            disabled=block is not None or unsaved,
-        ):
-            authz.require_coordinator()
-            review_store.approve_summary(protocol_id)
-            st.rerun()
-        if unsaved:
-            st.caption("Save your draft before approving, so the approved text is the text you reviewed.")
-        elif block:
-            st.caption("Cannot approve yet: " + block)
-
-    with st.expander("Summary history"):
-        for entry in review_store.summary_audit(protocol_id):
-            st.caption(f"{entry['at']} · {entry['action']} · {entry['detail'] or ''}")
+        changes_tab, history_tab = st.tabs(["Changes from the AI original", "Summary history"])
+        with changes_tab:
+            diff = change_diff(record["original_text"], record["draft_text"])
+            if diff:
+                st.code("\n".join(diff), language="diff")
+            else:
+                st.caption("No changes: the draft matches the AI original.")
+        with history_tab:
+            for entry in review_store.summary_audit(protocol_id):
+                st.caption(f"{entry['at']} · {entry['action']} · {entry['detail'] or ''}")
 
 
 _REQUEST_KEY = "summary_generation_requested"

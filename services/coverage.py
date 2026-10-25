@@ -165,12 +165,12 @@ def override_block_reason(
     return None
 
 
-def coverage_block_reason(
+def missing_categories(
     coverage: Mapping[str, Any],
     overrides: Optional[Mapping[str, Mapping[str, Any]]],
     analysis_complete: bool,
-) -> Optional[str]:
-    """Why critical-category coverage blocks publication (None when it does not)."""
+) -> List[str]:
+    """Labels of critical categories with no approved statement and no valid "Not applicable"."""
     overrides = overrides or {}
     missing: List[str] = []
     for key, entry in (coverage.get("categories") or {}).items():
@@ -182,6 +182,16 @@ def coverage_block_reason(
         ) is None and not entry.get("extracted"):
             continue
         missing.append(entry["label"])
+    return missing
+
+
+def coverage_block_reason(
+    coverage: Mapping[str, Any],
+    overrides: Optional[Mapping[str, Mapping[str, Any]]],
+    analysis_complete: bool,
+) -> Optional[str]:
+    """Why critical-category coverage would block publication without an acknowledgment."""
+    missing = missing_categories(coverage, overrides, analysis_complete)
     if missing:
         return (
             "Cannot publish: no approved, verified statement covers "

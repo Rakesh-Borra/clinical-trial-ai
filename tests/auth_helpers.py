@@ -5,7 +5,9 @@ from __future__ import annotations
 from services import auth, authz
 
 
-def sign_in_as(session_state, role: str, email: str | None = None) -> dict:
+def sign_in_as(
+    session_state, role: str, email: str | None = None, coord_view: str = "workflow"
+) -> dict:
     """Create a user with `role`, open a real session and store its token."""
     address = email or f"{role}@example.test"
     user = auth.get_user_by_email(address, role) or auth.create_user(
@@ -13,4 +15,7 @@ def sign_in_as(session_state, role: str, email: str | None = None) -> dict:
     )
     session_state[authz.TOKEN_KEY] = auth.create_session(user["id"])
     session_state["role"] = role
+    if role == "coordinator":
+        # Tests of the workflow start inside it; dashboard tests override this.
+        session_state["coord_view"] = coord_view
     return user

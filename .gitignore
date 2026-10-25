@@ -26,3 +26,7 @@ data/outputs/*
 # Optional benchmark timing logs (CTAI_BENCHMARK_LOG)
 *.benchmark.jsonl
 benchmark_logs/
+
+# Version-managed original PDFs and pre-migration database backups
+data/protocol_pdfs/
+data/backups/

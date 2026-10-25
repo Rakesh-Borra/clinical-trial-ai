@@ -93,6 +93,18 @@ def _record_turn(query: str, answer, guide: PatientGuide) -> None:
     chat_store.sync_active(st.session_state.get("patient_active_protocol_id"), guide)
 
 
+def version_chip(record: dict) -> str:
+    """'Version 2.0 · Published 2026-10-24', only from what is actually stored."""
+    label = record.get("version_label")
+    if not label:
+        return ""
+    text = f"Version {label}"
+    published = str(record.get("published_at") or "")[:10]
+    if len(published) == 10:
+        text += f" · Published {published}"
+    return theme.chip(text, "grey")
+
+
 def _published_protocols() -> dict[str, dict]:
     """Return only complete, fully approved snapshots saved by publishing."""
     published = st.session_state.get("published_protocols", {})
@@ -347,7 +359,7 @@ def render_patient_workspace() -> None:
     guide = patient_visible_guide(protocol["guide"])
     st.html(
         '<div class="ctai-chip-row" style="justify-content:flex-start;margin-bottom:.6rem">'
-        f'{theme.chip(protocol["name"], "lav")}</div>'
+        f'{theme.chip(protocol["name"], "lav")}{version_chip(protocol)}</div>'
     )
     theme.page_head(
         f"Welcome, {name}" if name else "Welcome to your study guide",
