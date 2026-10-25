@@ -1,3 +1,4 @@
+from tests.auth_helpers import sign_in_as
 """Summary generation lives in Step 2; Step 3 reviews. Readable formatting."""
 
 from unittest.mock import patch
@@ -19,7 +20,7 @@ LONG = " ".join(f"Sentence number {i} is here." for i in range(1, 11))
 
 def _step2(guide=None):
     at = AppTest.from_file(APP_PATH, default_timeout=30)
-    at.session_state["role"] = "coordinator"
+    sign_in_as(at.session_state, "coordinator")
     at.session_state["coord_step"] = "2 · Summary"
     at.session_state["coord_max_step"] = 2
     at.session_state["pipeline_result"] = _pipeline_result()
@@ -38,7 +39,7 @@ def test_step3_without_summary_never_generates_and_directs_to_step2(tmp_path, mo
     monkeypatch.setenv("CTAI_DB_PATH", str(tmp_path / "fresh.db"))
     with patch("services.summary_review.generate_patient_summary") as gen:
         at = AppTest.from_file(APP_PATH, default_timeout=30)
-        at.session_state["role"] = "coordinator"
+        sign_in_as(at.session_state, "coordinator")
         at.session_state["coord_step"] = "3 · Review"
         at.session_state["coord_max_step"] = 2
         at.session_state["pipeline_result"] = _pipeline_result()

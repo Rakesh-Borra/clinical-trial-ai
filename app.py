@@ -22,11 +22,11 @@ from models.plain_language_models import PatientGuide
 from models.protocol_models import ProtocolAnalysis
 from agents.guide_patient_agent import APPROVED_STATUS
 from models.protocol_models import ProtocolAnalysis
-from services import analysis_jobs, review_store
+from services import analysis_jobs, authz, review_store
 from services.model_provider import provider_display_name
 from services.protocol_pipeline import analyze_protocol_pdf
 from services import benchmark_log
-from ui import theme
+from ui import auth_pages, theme
 from ui.landing import (
     COORDINATOR,
     NAME_KEY,
@@ -213,6 +213,7 @@ def active_analysis_job() -> Optional[analysis_jobs.JobSnapshot]:
 
 def start_analysis() -> None:
     """Start analysis in the background for the current upload (idempotent)."""
+    authz.require_coordinator()
     if st.session_state.get("pipeline_result") is not None or active_analysis_job():
         return
     st.session_state["analysis_error"] = None
@@ -863,6 +864,10 @@ def published_matches_current(
 
 def publish_current_protocol() -> tuple[bool, str]:
     """Save an approved snapshot for the patient portal after all checks pass."""
+    try:
+        authz.require_coordinator()
+    except authz.AuthorizationError as exc:
+        return False, str(exc)
     protocol_id = st.session_state.get("coordinator_protocol_id")
     protocol_name = current_protocol_name()
     guide = get_guide()
@@ -915,6 +920,10 @@ UNPUBLISHED_MESSAGE = (
 
 def unpublish_current_protocol() -> tuple[bool, str]:
     """Withdraw the published snapshot so patients and the assistant lose it."""
+    try:
+        authz.require_coordinator()
+    except authz.AuthorizationError as exc:
+        return False, str(exc)
     protocol_id = st.session_state.get("coordinator_protocol_id")
     if not protocol_id or protocol_id not in st.session_state.get("published_protocols", {}):
         return False, "This protocol is not published."
@@ -1348,6 +1357,11 @@ def _render_publish_status(
 
 
 def render_coordinator_workspace() -> None:
+    try:
+        authz.require_coordinator()
+    except authz.AuthorizationError as exc:
+        st.error(str(exc))
+        return
     if not st.session_state.get("_draft_restore_done"):
         st.session_state["_draft_restore_done"] = True
         restore_last_draft()
@@ -1401,6 +1415,11 @@ def render_coordinator_workspace() -> None:
         render_review_step()
 
 
+def allowed_roles(account_role: str) -> tuple[str, ...]:
+    """Workspaces an account may open; coordinators may preview the patient portal."""
+    return (COORDINATOR, PATIENT) if account_role == COORDINATOR else (PATIENT,)
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Clinical Trial AI",
@@ -1413,8 +1432,19 @@ def main() -> None:
     if collect_analysis_job() and st.session_state.get("_analysis_watched"):
         st.session_state["_analysis_just_completed"] = True
 
+    user = authz.current_user()
     role = st.session_state.get(ROLE_KEY)
-    if role == COORDINATOR:
+    # The workspace always follows the signed-in account, never a stored or navigated role.
+    if user is None or role not in allowed_roles(user["role"]):
+        role = None
+        st.session_state[ROLE_KEY] = None
+    if user is None:
+        st.session_state.pop(authz.TOKEN_KEY, None)
+
+    if role and st.session_state.get("show_profile"):
+        render_top_bar(role)
+        auth_pages.render_profile_page(user)
+    elif role == COORDINATOR:
         render_coordinator_workspace()
     elif role == PATIENT:
         render_patient_workspace()

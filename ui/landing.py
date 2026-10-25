@@ -1,16 +1,16 @@
 """
 Welcome page: pick a role and sign in.
 
-This is a demo sign-in for the hackathon prototype. There are no passwords or
-accounts; choosing a role decides which workspace opens. The optional name is
-only used to greet the person.
+Sign-in uses real accounts (services/auth.py). The role of the signed-in
+account, never a user-chosen option, decides which workspace opens.
 """
 
 from __future__ import annotations
 
 import streamlit as st
 
-from ui import theme
+from services import auth, authz
+from ui import auth_pages, theme
 
 ROLE_KEY = "role"
 NAME_KEY = "user_name"
@@ -18,6 +18,7 @@ HOME_BUTTON_KEY = "home_btn"
 
 COORDINATOR = "coordinator"
 PATIENT = "patient"
+ROLE_LABELS = {COORDINATOR: "Research coordinator", PATIENT: "Patient/caregiver"}
 PAGE_HISTORY_KEY = "page_history"
 PAGE_HISTORY_INDEX_KEY = "page_history_index"
 
@@ -135,18 +136,42 @@ def current_role() -> str | None:
     return st.session_state.get(ROLE_KEY)
 
 
-def sign_in(role: str, name: str = "") -> None:
+def open_workspace(user: dict) -> None:
     page = (
         coordinator_page("1 · Upload", 0)
-        if role == COORDINATOR
+        if user["role"] == COORDINATOR
         else patient_page()
     )
     navigate_to_page(page)
-    st.session_state[NAME_KEY] = (name or "").strip()
+    st.session_state[NAME_KEY] = user["full_name"]
+    st.rerun()
+
+
+def sign_in(user: dict, token: str) -> None:
+    """Start an authenticated session for a user who just proved their credentials."""
+    st.session_state[authz.TOKEN_KEY] = token
+    open_workspace(user)
+
+
+def open_profile(user: dict) -> None:
+    """Open the profile page in the workspace that matches the account."""
+    navigate_to_page(coordinator_page("1 · Upload", 0) if user["role"] == COORDINATOR else patient_page())
+    st.session_state["show_profile"] = True
+    st.session_state[NAME_KEY] = user["full_name"]
+    st.rerun()
+
+
+def go_home() -> None:
+    navigate_to_page(home_page())
+    st.session_state["show_profile"] = False
     st.rerun()
 
 
 def sign_out() -> None:
+    """End the server-side session and clear everything tied to the user."""
+    auth.end_session(st.session_state.pop(authz.TOKEN_KEY, None))
+    st.session_state["show_profile"] = False
+    st.session_state[NAME_KEY] = ""
     navigate_to_page(home_page())
     st.rerun()
 
@@ -154,7 +179,7 @@ def sign_out() -> None:
 def render_top_bar(
     role: str | None = None,
 ) -> None:
-    """Show the Home action and the current demo role's account menu."""
+    """Show the Home action and the signed-in user's account menu."""
     _ensure_page_history()
     with st.container(key="topbar"):
         left, previous, next_, _, right = st.columns(
@@ -166,14 +191,17 @@ def render_top_bar(
             key=HOME_BUTTON_KEY,
             icon=":material/health_and_safety:",
         ):
-            sign_out()
+            go_home()
 
         _render_history_arrows(previous, next_)
 
-        if role:
-            label = "Research coordinator" if role == COORDINATOR else "Patient/caregiver"
+        user = authz.current_user()
+        if role and user:
             with right.popover("Account", use_container_width=True):
-                st.caption(f"Demo role · {label}")
+                st.caption(f"{user['full_name']} · {ROLE_LABELS[user['role']]}")
+                if st.button("Profile", key="profile_btn", use_container_width=True):
+                    st.session_state["show_profile"] = True
+                    st.rerun()
                 if st.button("Logout", key="logout_btn", use_container_width=True):
                     sign_out()
 
@@ -229,8 +257,14 @@ def render_landing() -> None:
                 navigate_to_page(home_page())
                 st.rerun()
             _render_history_arrows(previous, next_)
-            with account.popover("Account", key="landing_account", use_container_width=True):
-                st.caption("Choose a demo role below to continue.")
+            user = authz.current_user()
+            if user:
+                with account.popover("Account", key="landing_account", use_container_width=True):
+                    st.caption(f"{user['full_name']} · {ROLE_LABELS[user['role']]}")
+                    if st.button("Profile", key="landing_profile_btn", use_container_width=True):
+                        open_profile(user)
+                    if st.button("Logout", key="landing_logout_menu_btn", use_container_width=True):
+                        sign_out()
 
         with st.container(key="landing_hero"):
             left, right = st.columns([1.12, .88], gap="large", vertical_alignment="center")
@@ -259,48 +293,11 @@ def render_landing() -> None:
 
             with right:
                 with st.container(key="landing_role_panel"):
-                    st.html(
-                        '<section id="landing-roles">'
-                        '<div class="ctai-role-heading">Welcome to your workspace</div>'
-                        '<p class="ctai-role-subtitle">Select a demo role to continue.</p>'
-                    )
-                    role = st.radio(
-                        "Select your demo role",
-                        options=[COORDINATOR, PATIENT],
-                        format_func=lambda value: (
-                            "Research coordinator"
-                            if value == COORDINATOR
-                            else "Patient / caregiver"
-                        ),
-                        key="login_role",
-                        horizontal=True,
-                        label_visibility="collapsed",
-                    )
-                    role_description = (
-                        "Review protocol findings, sources, and patient-facing statements."
-                        if role == COORDINATOR
-                        else "View the approved study guide and ask questions about the protocol."
-                    )
-                    st.caption(role_description)
-                    name = st.text_input(
-                        "Name (optional)",
-                        key="login_name",
-                        placeholder="Your name",
-                    )
-                    if st.button(
-                        "Continue as coordinator"
-                        if role == COORDINATOR
-                        else "Continue as patient",
-                        key="login_continue_btn",
-                        type="primary",
-                    ):
-                        sign_in(role, name)
-
-                    st.html(
-                        '<div class="ctai-demo-notice"><strong>Demo navigation only.</strong> '
-                        "Choosing a role does not authenticate you or restrict access. "
-                        "No account or password is used.</div></section>"
-                    )
+                    user = authz.current_user()
+                    if user:
+                        auth_pages.render_signed_in_panel(user)
+                    else:
+                        auth_pages.render_auth_panel()
 
         st.html(
             '<div class="ctai-landing-footer">'

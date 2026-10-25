@@ -283,10 +283,27 @@ If the terminal prints a different Local URL, use that URL instead.
 
 ---
 
+## 9b. Accounts and sign-in
+
+Sign-in uses real accounts stored in the same SQLite file as the review data (`data/ctai.db`, or `CTAI_DB_PATH`). Passwords are hashed with Argon2id; sessions last 8 hours or until you log out; five failed sign-ins lock an account for 15 minutes.
+
+- **Patients** register themselves on the welcome page (**Create account**). Public registration can only create patient accounts.
+- **Coordinators** are created by an administrator on the machine running the app (the password is prompted for, never passed on the command line):
+
+  ```bash
+  python -m scripts.manage_users create-coordinator --email you@example.org --name "Your Name"
+  python -m scripts.manage_users promote --email existing@example.org     # patient -> coordinator
+  python -m scripts.manage_users reset-password --email you@example.org
+  ```
+
+- **Password recovery** emails a single-use reset code (valid 30 minutes). It needs SMTP settings in the environment: `CTAI_SMTP_HOST`, `CTAI_SMTP_FROM` (required), `CTAI_SMTP_PORT` (default 587), `CTAI_SMTP_USER`, `CTAI_SMTP_PASSWORD`, and `CTAI_APP_URL` (adds a clickable link). Without them the app says recovery is unavailable; an administrator can use `reset-password` instead. Keep these values in your environment or an untracked `.env`, never in Git.
+- There is no "remember me": a session ends when the browser tab closes or you log out.
+
+---
+
 ## 10. First-time walkthrough
 
-1. Open the Streamlit app. You land on the **Welcome to Clinical Trial AI** page.
-2. Choose **Sign in as coordinator** (demo sign-in: no password).
+1. Open the Streamlit app. You land on the **Welcome to Clinical Trial AI** page. Create the first coordinator account with the command above, then sign in.
 3. **Step 1 · Upload**: upload any protocol PDF you choose (none is bundled), pick the document type, click **Analyze protocol**. **Analysis can take several minutes** with local `qwen3:4b`; a completed analysis of the same text and settings is reused from the SQLite cache.
 4. Walk through the three steps:
 
@@ -297,7 +314,7 @@ If the terminal prints a different Local URL, use that URL instead.
 | **3 · Review** | Generate patient statements; compare each with its source excerpt and page; edit and save, **reverify** edited text, approve or reject; **preview as a patient**; publish or unpublish |
 
    Review states are **Pending Review**, **Approved**, **Rejected**, **Needs Reverification** and **Published**. Publishing is blocked while any statement is pending, entirely rejected, unverified or edited-but-not-reverified.
-5. Click **Switch role** and sign in as a **patient**: the published guide is on the left and the chat assistant on the right. Patients see only published content. Withdrawing (unpublishing) removes it from the Patient Assistant.
+5. Log out and sign in as a **patient** (register on the welcome page first): the published guide is on the left and the chat assistant on the right. Patients see only published content. Withdrawing (unpublishing) removes it from the Patient Assistant.
 
 ### Example questions
 
@@ -409,7 +426,7 @@ clinical-trial-ai/
 - Analysis depends on a local Ollama install and machine resources; local analysis of long protocols is slow, and recall dropped to 23% on an 86-page protocol in the earlier evaluation. Safety sections were the weakest category. Inputs over 320,000 characters or 65 model calls are rejected with an actionable message. No speed-up from the latest optimisations has been measured on a full protocol.
 - Section/heading detection is heuristic; table extraction handles ruled tables only and its text appears alongside the page text in model input.
 - Patient answers are mostly the approved statements themselves; unusual phrasing may get a safe "cannot answer" reply. The assistant is conservative about topics such as blood collection.
-- Role sign-in is a demo (no password) and not a security boundary.
+- Authentication is a lightweight, single-server design: no multi-factor sign-in, no "remember me", and the login rate limit is per email (not per IP).
 - Evaluation figures in this README predate the latest pipeline changes.
 
 ### Planned improvements

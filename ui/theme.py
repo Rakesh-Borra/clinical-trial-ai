@@ -1189,6 +1189,16 @@ LANDING_CSS = """
   .stApp:has(.st-key-landing_shell) .ctai-research-art { margin-top: 1.2rem; }
   .stApp:has(.st-key-landing_shell) .ctai-role-panel { padding: 1.25rem; }
 }
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primaryFormSubmit"],
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primary"] {
+  color: #0b1218 !important;
+  font-weight: 600;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primaryFormSubmit"] p,
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primary"] p {
+  color: #0b1218 !important;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stForm"] { padding: 0; }
 @media (prefers-reduced-motion: reduce) {
   .stApp:has(.st-key-landing_shell) *,
   .stApp:has(.st-key-landing_shell) *::before,

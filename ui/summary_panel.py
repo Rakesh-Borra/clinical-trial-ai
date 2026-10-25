@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import streamlit as st
 
 from models.plain_language_models import PatientGuide
-from services import review_store
+from services import authz, review_store
 from services.coverage import build_coverage, override_block_reason
 from services.summary_review import (
     change_diff,
@@ -159,6 +159,7 @@ def render_summary_panel(guide: PatientGuide, protocol_id: str) -> None:
             "Approve summary", key="summary_approve_btn", type="primary",
             disabled=block is not None or unsaved,
         ):
+            authz.require_coordinator()
             review_store.approve_summary(protocol_id)
             st.rerun()
         if unsaved:

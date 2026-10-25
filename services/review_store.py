@@ -10,7 +10,8 @@ duplicate record:
 - history:      an append-only log of coordinator actions
 
 The database lives at data/ctai.db unless CTAI_DB_PATH points elsewhere.
-Nothing here imports Streamlit, so the rules are easy to test.
+Writes made from a live app session require a signed-in coordinator
+(see _coordinator_only); bare calls from scripts and tests are unrestricted.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+import functools
 from typing import Any, Dict, List, Optional
 
 from models.plain_language_models import GuideItem, PatientGuide
@@ -91,6 +93,22 @@ CREATE TABLE IF NOT EXISTS history (
 """
 
 
+def _coordinator_only(func):
+    """Refuse writes from a live Streamlit session unless a coordinator is signed in."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx(suppress_warning=True) is not None:
+            from services import authz
+
+            authz.require_coordinator()
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
 def db_path() -> Path:
     return Path(os.getenv("CTAI_DB_PATH") or DEFAULT_DB_PATH)
 
@@ -117,6 +135,7 @@ def _run(sql: str, params: tuple = ()) -> None:
 # Drafts
 # ---------------------------------------------------------------------------
 
+@_coordinator_only
 def save_draft(
     protocol_id: str,
     guide: PatientGuide,
@@ -195,6 +214,7 @@ def load_generated_items(protocol_id: str, fingerprint: str) -> Dict[str, GuideI
     return out
 
 
+@_coordinator_only
 def clear_generated_items(protocol_id: str, keep_fingerprint: Optional[str] = None) -> None:
     """Drop stored generation output (other analyses of the same protocol)."""
     with closing(_connect()) as conn, conn:
@@ -258,6 +278,7 @@ def _pipeline_from_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
 # Publications
 # ---------------------------------------------------------------------------
 
+@_coordinator_only
 def publish(protocol_id: str, name: str, snapshot: PatientGuide) -> None:
     """Make a snapshot patient-visible (replaces any earlier version)."""
     with closing(_connect()) as conn, conn:
@@ -277,6 +298,7 @@ def publish(protocol_id: str, name: str, snapshot: PatientGuide) -> None:
         )
 
 
+@_coordinator_only
 def unpublish(protocol_id: str) -> bool:
     """Withdraw a publication. Returns True when something was withdrawn."""
     with closing(_connect()) as conn, conn:
@@ -323,6 +345,7 @@ def load_publications() -> Dict[str, Dict[str, Any]]:
 # History
 # ---------------------------------------------------------------------------
 
+@_coordinator_only
 def log_action(protocol_id: str, action: str, detail: str = "") -> None:
     _run(
         "INSERT INTO history (protocol_id, at, action, detail) VALUES (?, ?, ?, ?)",
@@ -361,6 +384,7 @@ def load_summary(protocol_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+@_coordinator_only
 def save_original_summary(protocol_id: str, text: str, generated_by: str) -> None:
     """Store a newly generated AI summary; it also becomes the working draft."""
     with closing(_connect()) as conn, conn:
@@ -388,6 +412,7 @@ def save_original_summary(protocol_id: str, text: str, generated_by: str) -> Non
         )
 
 
+@_coordinator_only
 def save_summary_draft(protocol_id: str, text: str, actor: str = "coordinator") -> bool:
     """
     Save a coordinator edit as the draft; the original is untouched.
@@ -418,6 +443,7 @@ def save_summary_draft(protocol_id: str, text: str, actor: str = "coordinator") 
     return True
 
 
+@_coordinator_only
 def approve_summary(protocol_id: str, actor: str = "coordinator") -> bool:
     """Approve exactly the current draft text."""
     with closing(_connect()) as conn, conn:
@@ -437,6 +463,7 @@ def approve_summary(protocol_id: str, actor: str = "coordinator") -> bool:
     return True
 
 
+@_coordinator_only
 def withdraw_summary_approval(protocol_id: str) -> None:
     with closing(_connect()) as conn, conn:
         cursor = conn.execute(
@@ -462,6 +489,7 @@ def summary_audit(protocol_id: str, limit: int = 50) -> List[Dict[str, Any]]:
 # "Not applicable" overrides for critical categories
 # ---------------------------------------------------------------------------
 
+@_coordinator_only
 def set_coverage_override(protocol_id: str, category: str, reason: str) -> None:
     with closing(_connect()) as conn, conn:
         conn.execute(
@@ -476,6 +504,7 @@ def set_coverage_override(protocol_id: str, category: str, reason: str) -> None:
     log_action(protocol_id, "category_not_applicable", f"{category}: {reason}")
 
 
+@_coordinator_only
 def clear_coverage_override(protocol_id: str, category: str) -> None:
     _run(
         "DELETE FROM coverage_overrides WHERE protocol_id = ? AND category = ?",

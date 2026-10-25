@@ -1,3 +1,4 @@
+from tests.auth_helpers import sign_in_as
 """
 Tests for the Patient Assistant that answers only from the approved guide.
 
@@ -441,7 +442,7 @@ def test_app_rejects_partially_approved_patient_protocol_snapshot():
                 "guide": partial_guide,
             }
         }
-    at.session_state["role"] = "patient"
+    sign_in_as(at.session_state, "patient")
     at.run()
 
     assert not at.exception
