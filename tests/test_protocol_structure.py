@@ -308,7 +308,27 @@ def test_no_extra_model_calls_beyond_two_passes_per_chunk():
 
 def test_input_character_limit_still_enforced():
     from agents.protocol_analysis_agent import analyze_protocol_in_chunks
-    with pytest.raises(ValueError, match="input limit"):
+    with pytest.raises(ValueError, match="overall resource cap"):
         analyze_protocol_in_chunks(
             "x" * 320_001, chunk_chars=8000, max_input_chars=320_000,
             max_calls=65, rescue_max_chars=8000)
+
+
+def test_default_resource_cap_accepts_377k_character_protocols():
+    from agents.protocol_analysis_agent import analyze_protocol_in_chunks
+    from services.protocol_pipeline import (
+        PROTOCOL_MAX_CALLS,
+        PROTOCOL_MAX_INPUT_CHARS,
+    )
+
+    # The previous 320k hard reject blocked a real 123-page extract.
+    assert PROTOCOL_MAX_INPUT_CHARS >= 377_769
+    assert PROTOCOL_MAX_CALLS >= 200
+    with pytest.raises(ValueError, match="overall resource cap"):
+        analyze_protocol_in_chunks(
+            "x" * (PROTOCOL_MAX_INPUT_CHARS + 1),
+            chunk_chars=5000,
+            max_input_chars=PROTOCOL_MAX_INPUT_CHARS,
+            max_calls=PROTOCOL_MAX_CALLS,
+            rescue_max_chars=8000,
+        )

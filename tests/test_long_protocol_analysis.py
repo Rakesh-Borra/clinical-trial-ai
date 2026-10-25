@@ -81,8 +81,9 @@ def test_long_analysis_processes_all_chunks_and_preserves_page_citations():
     assert len(pass_b_calls) == len(expected_chunks)
     assert calls == len(expected_chunks) * 2
     assert failed == []
+    assert incomplete == []
+    assert analysis.analysis_complete is True
     assert any("Oversized source pages were split" in warning for warning in warnings)
-    assert any("Oversized source pages were split" in reason for reason in incomplete)
     assert {item.source_page for item in analysis.inclusion_criteria} <= {4, 9}
     assert {item.source_page for item in analysis.procedures} <= {4, 9}
 
@@ -125,7 +126,8 @@ def test_chunk_merge_preserves_clinically_distinct_payloads_and_pages():
 
     merged, warnings = _merge_chunk_analyses([first, second])
 
-    assert warnings == []
+    assert any("Conflicting procedure details" in w for w in warnings)
+    assert any("Conflicting visit schedule details" in w for w in warnings)
     assert [(x.description, x.source_page) for x in merged.inclusion_criteria] == [
         ("HbA1c >= 7.0%.", 3),
         ("HbA1c >= 7.0%.", 4),
@@ -157,6 +159,7 @@ def test_failed_chunk_pass_is_reported_and_successful_pass_retained():
         "agents.protocol_analysis_agent._pass_a_metadata_eligibility_safety",
         side_effect=[
             RuntimeError("simulated pass A failure"),
+            RuntimeError("simulated pass A failure"),
             MetadataEligibilitySafetyExtraction(
                 inclusion_criteria=[
                     EligibilityCriterion(
@@ -178,6 +181,7 @@ def test_failed_chunk_pass_is_reported_and_successful_pass_retained():
                 max_input_chars=5000,
                 max_calls=65,
                 rescue_max_chars=1000,
+                pass_retries=1,
             )
         )
 
@@ -190,6 +194,48 @@ def test_failed_chunk_pass_is_reported_and_successful_pass_retained():
     assert any("did not complete both extraction passes" in reason for reason in incomplete)
 
 
+def test_failed_pass_retries_once_then_succeeds_without_duplicate():
+    protocol = (
+        "[SOURCE PAGE 2]\nINCLUSION CRITERIA:\n"
+        + "Age must be at least eighteen years.\n" * 5
+    )
+
+    with patch(
+        "agents.protocol_analysis_agent._pass_a_metadata_eligibility_safety",
+        side_effect=[
+            RuntimeError("transient failure"),
+            MetadataEligibilitySafetyExtraction(
+                inclusion_criteria=[
+                    EligibilityCriterion(
+                        description="Age 18 or older.",
+                        source_page=2,
+                    )
+                ],
+            ),
+        ],
+    ) as pass_a, patch(
+        "agents.protocol_analysis_agent._pass_b_visits_procedures",
+        return_value=VisitsProceduresExtraction(),
+    ):
+        analysis, warnings, failed, incomplete, calls = (
+            analyze_protocol_in_chunks(
+                protocol,
+                chunk_chars=500,
+                max_input_chars=5000,
+                max_calls=65,
+                rescue_max_chars=1000,
+                pass_retries=1,
+            )
+        )
+
+    assert pass_a.call_count == 2
+    assert calls >= 3  # pass A twice + pass B once
+    assert failed == []
+    assert incomplete == []
+    assert len(analysis.inclusion_criteria) == 1
+    assert any("retrying" in warning for warning in warnings)
+
+
 def test_chunk_and_input_caps_fail_before_any_extraction_calls():
     protocol = "[SOURCE PAGE 1]\n" + "Long source text. " * 100
 
@@ -198,7 +244,7 @@ def test_chunk_and_input_caps_fail_before_any_extraction_calls():
     ) as pass_a, patch(
         "agents.protocol_analysis_agent._pass_b_visits_procedures"
     ) as pass_b:
-        with pytest.raises(ValueError, match="exceeding the configured input limit"):
+        with pytest.raises(ValueError, match="overall resource cap"):
             analyze_protocol_in_chunks(
                 protocol,
                 chunk_chars=100,

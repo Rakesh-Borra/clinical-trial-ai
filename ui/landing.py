@@ -194,9 +194,17 @@ def render_top_bar(
 ) -> None:
     """Show the Home action and the signed-in user's account menu."""
     _ensure_page_history()
+    from ui.scroll_nav import render_topbar_scroll_buttons, should_show_scroll_nav
+
+    show_scroll = should_show_scroll_nav(
+        role=role,
+        view=st.session_state.get(COORD_VIEW_KEY),
+        show_profile=bool(st.session_state.get("show_profile")),
+        on_landing=False,
+    )
     with st.container(key="topbar"):
-        left, previous, next_, _, right = st.columns(
-            [2, .5, .5, 6, 1.3],
+        left, previous, next_, _, actions = st.columns(
+            [2, .5, .5, 5.2, 2.4] if show_scroll else [2, .5, .5, 6, 1.3],
             vertical_alignment="center",
         )
         if left.button(
@@ -210,7 +218,16 @@ def render_top_bar(
 
         user = authz.current_user()
         if role and user:
-            with right.popover("Account", use_container_width=True):
+            if show_scroll:
+                scroll, account = actions.columns(
+                    [1.05, 1.55],
+                    vertical_alignment="center",
+                )
+                with scroll:
+                    render_topbar_scroll_buttons()
+            else:
+                account = actions
+            with account.popover("Account", use_container_width=True):
                 st.caption(f"{user['full_name']} · {ROLE_LABELS[user['role']]}")
                 if st.button("Profile", key="profile_btn", use_container_width=True):
                     st.session_state["show_profile"] = True

@@ -76,3 +76,54 @@ def store(key: str, analysis: ProtocolAnalysis, warnings: list[str]) -> None:
             )
     except Exception:
         pass
+
+
+_PASS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS chunk_pass_cache (
+    cache_key TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
+
+def make_pass_key(chunk_text: str, pass_name: str, settings: Dict[str, Any]) -> str:
+    """Cache key for one successful extraction pass on one chunk."""
+    return make_key(
+        chunk_text,
+        {**settings, "pass": pass_name, "cache_kind": "chunk_pass"},
+    )
+
+
+def load_pass(key: str) -> Optional[Dict[str, Any]]:
+    """Return a stored pass payload, or None on miss / corruption."""
+    try:
+        with closing(_connect()) as conn:
+            conn.executescript(_PASS_SCHEMA)
+            row = conn.execute(
+                "SELECT payload FROM chunk_pass_cache WHERE cache_key = ?",
+                (key,),
+            ).fetchone()
+        if not row:
+            return None
+        data = json.loads(row[0])
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def store_pass(key: str, payload: Dict[str, Any]) -> None:
+    """Persist a successful chunk extraction pass for later retries."""
+    try:
+        with closing(_connect()) as conn, conn:
+            conn.executescript(_PASS_SCHEMA)
+            conn.execute(
+                "INSERT OR REPLACE INTO chunk_pass_cache VALUES (?, ?, ?)",
+                (
+                    key,
+                    json.dumps(payload),
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+    except Exception:
+        pass

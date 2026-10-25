@@ -309,6 +309,52 @@ DARK_WORKSPACE_CSS = """
   background:rgba(169,201,214,.08);
   color:var(--ink);
 }
+.stApp:not(:has(.st-key-landing_shell)) .st-key-topbar [data-testid="stHtml"]:has(.ctai-scroll-actions) {
+  display:flex !important;
+  align-items:center;
+  justify-content:flex-end;
+  height:100%;
+  margin:0 !important;
+  padding:0 !important;
+}
+.stApp:not(:has(.st-key-landing_shell)) .st-key-topbar .ctai-scroll-actions {
+  display:flex;
+  gap:.35rem;
+  align-items:center;
+  justify-content:flex-end;
+  min-height:2.1rem;
+  margin:0;
+  align-self:center;
+}
+.stApp:not(:has(.st-key-landing_shell)) .st-key-topbar .ctai-scroll-btn {
+  box-sizing:border-box;
+  min-width:2.1rem;
+  height:2.1rem;
+  padding:0 .45rem;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:rgba(255,255,255,.035);
+  color:var(--ink);
+  cursor:pointer;
+  font-size:1rem;
+  line-height:1;
+  font-weight:650;
+  box-shadow:none;
+}
+.stApp:not(:has(.st-key-landing_shell)) .st-key-topbar .ctai-scroll-btn:hover:not(:disabled) {
+  border-color:rgba(169,201,214,.42);
+  background:rgba(169,201,214,.08);
+  color:var(--ink);
+}
+.stApp:not(:has(.st-key-landing_shell)) .st-key-topbar .ctai-scroll-btn:disabled {
+  opacity:.35;
+  cursor:default;
+}
+.stApp:not(:has(.st-key-landing_shell)) [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) {
+  position:sticky;
+  top:0;
+  z-index:300;
+}
 .stApp:not(:has(.st-key-landing_shell)) .ctai-brand,
 .stApp:not(:has(.st-key-landing_shell)) .ctai-brand b {
   color:var(--ink);

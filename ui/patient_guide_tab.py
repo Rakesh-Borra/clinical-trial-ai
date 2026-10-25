@@ -47,6 +47,7 @@ from models.plain_language_models import (
     page_label,
 )
 from services import authz, benchmark_log, guide_jobs, review_store, version_store
+from services.guide_quality import audit_guide_quality, group_findings
 from services.guide_review import (
     ALL,
     APPROVED,
@@ -72,6 +73,7 @@ GUIDE_SOURCE_KEY = "patient_guide_source"
 GUIDE_JOB_KEY = "guide_job_id"
 GUIDE_ERROR_KEY = "guide_generation_error"
 GUIDE_AUTOSTART_KEY = "guide_autostart_fingerprint"
+GUIDE_PAUSED_KEY = "guide_generation_paused"
 MANUAL_KEEP_KEY = "guide_manual_keep"
 FILTER_KEY = "guide_review_filter"
 APPROVE_ALL_CONFIRM_KEY = "guide_approve_all_pending"
@@ -157,9 +159,25 @@ def is_fully_approved_snapshot(guide: Any) -> bool:
 def clear_guide() -> None:
     """Forget the guide and any generation in progress or failed."""
     guide_jobs.jobs.discard(st.session_state.get(GUIDE_JOB_KEY))
-    for key in (GUIDE_KEY, GUIDE_SOURCE_KEY, GUIDE_JOB_KEY, GUIDE_ERROR_KEY, GUIDE_AUTOSTART_KEY):
+    for key in (
+        GUIDE_KEY, GUIDE_SOURCE_KEY, GUIDE_JOB_KEY, GUIDE_ERROR_KEY,
+        GUIDE_AUTOSTART_KEY, GUIDE_PAUSED_KEY,
+    ):
         st.session_state.pop(key, None)
     purge_item_widget_state()
+
+
+def _reattach_job(fingerprint: str) -> Optional[guide_jobs.GuideJob]:
+    """Recover the in-process job after navigation loses session job id."""
+    key = _job_key(fingerprint)
+    job = guide_jobs.jobs.get(st.session_state.get(GUIDE_JOB_KEY))
+    if job is not None and job.key == key:
+        return job
+    job = guide_jobs.jobs.find_active(key)
+    if job is not None:
+        st.session_state[GUIDE_JOB_KEY] = job.job_id
+        return job
+    return None
 
 
 _ITEM_WIDGET_KEY = re.compile(r"^guide_[0-9a-f]{12}(?:-\d+)?_")
@@ -261,6 +279,12 @@ def _start_generation(
     skips statements that already exist, so a restarted or retried job only
     does the missing work (and, for a retry, the failed work).
     """
+    existing = guide_jobs.jobs.find_active(_job_key(fingerprint))
+    if existing is not None:
+        st.session_state[GUIDE_JOB_KEY] = existing.job_id
+        st.session_state[GUIDE_PAUSED_KEY] = False
+        return
+
     analysis = pipeline_result["analysis"]
     verification = pipeline_result.get("verification")
     store_id = _store_id()
@@ -268,22 +292,36 @@ def _start_generation(
     guide = get_guide()
     known = {i.item_id: i for i in guide.all_items() if i.item_id} if guide else {}
 
-    def runner(advance):
+    def runner(advance, cancel_check):
         stored = review_store.load_generated_items(store_id, fingerprint)
+        # Prefer in-memory coordinator decisions over stale stored drafts.
         reuse = {**stored, **known}
         if retry_failed:
-            reuse = {k: v for k, v in reuse.items() if not v.generation_failed}
+            reuse = {
+                k: v for k, v in reuse.items()
+                if not v.generation_failed
+                or v.approved or v.rejected or v.generated_by == "coordinator"
+            }
 
         def on_item(item):
-            if item.item_id not in reuse:
-                review_store.save_generated_item(store_id, fingerprint, item)
+            prior = reuse.get(item.item_id) or known.get(item.item_id)
+            if prior is not None and (
+                prior.approved or prior.rejected or prior.generated_by == "coordinator"
+            ):
+                advance()
+                return
+            review_store.save_generated_item(store_id, fingerprint, item)
             advance()
 
         started = time.perf_counter()
         try:
             guide_result = generate_patient_guide(
-                analysis, on_item=on_item, verification=verification, reuse=reuse,
+                analysis,
+                on_item=on_item,
+                verification=verification,
+                reuse=reuse,
                 source_pages=pipeline_result.get("source_pages"),
+                cancel_check=cancel_check,
             )
         except Exception as exc:
             benchmark_log.record(
@@ -295,16 +333,19 @@ def _start_generation(
         items = guide_result.all_items()
         benchmark_log.record(
             "statements", label,
-            success=not any(i.generation_failed for i in items),
+            success=guide_result.generation_complete
+            and not any(i.generation_failed for i in items),
             seconds=round(time.perf_counter() - started, 3),
             statements=len(items),
             reused=sum(1 for i in items if i.item_id in reuse),
             failed=sum(1 for i in items if i.generation_failed),
             warnings=sum(1 for i in items if verification_warnings(i)),
+            cancelled=bool(cancel_check()),
         )
         return guide_result
 
     st.session_state[GUIDE_ERROR_KEY] = None
+    st.session_state[GUIDE_PAUSED_KEY] = False
     st.session_state[GUIDE_AUTOSTART_KEY] = fingerprint
     st.session_state[GUIDE_JOB_KEY] = guide_jobs.jobs.submit(
         _job_key(fingerprint), runner, max(count_statements(analysis), 1)
@@ -313,14 +354,18 @@ def _start_generation(
 
 def _collect_generation(fingerprint: str) -> None:
     """Record a finished job's outcome (main thread only). Items arrive via the store."""
-    job_id = st.session_state.get(GUIDE_JOB_KEY)
-    job = guide_jobs.jobs.get(job_id)
+    job = _reattach_job(fingerprint)
     if job is None:
         st.session_state[GUIDE_JOB_KEY] = None
         return
     if job.active:
         return
+    job_id = job.job_id
     st.session_state[GUIDE_JOB_KEY] = None
+    if job.status == guide_jobs.PAUSED:
+        st.session_state[GUIDE_PAUSED_KEY] = True
+    elif job.status == guide_jobs.COMPLETED:
+        st.session_state[GUIDE_PAUSED_KEY] = False
     guide_jobs.jobs.release(job_id)
     if job.status == guide_jobs.DISCARDED or job.key != _job_key(fingerprint):
         return
@@ -341,16 +386,16 @@ def _sync_generated(pipeline_result: Mapping[str, Any], fingerprint: str) -> Opt
 
     Existing statements keep their object, so decisions made while generation
     continued are never overwritten. Saves the draft when anything arrived.
+    Always merges from SQLite so progress cannot lag behind persistence.
     """
     analysis = pipeline_result["analysis"]
     guide = get_guide()
-    if guide is not None and guide.generation_complete:
-        return guide
     stored = _stored_items(fingerprint)
+    expected = count_statements(analysis)
     if guide is None:
-        if not stored and count_statements(analysis) > 0:
+        if not stored and expected > 0:
             return None
-        guide = new_guide_shell(analysis, count_statements(analysis), False)
+        guide = new_guide_shell(analysis, expected, False)
         st.session_state[GUIDE_KEY] = guide
         st.session_state[GUIDE_SOURCE_KEY] = fingerprint
         for kept in st.session_state.pop(MANUAL_KEEP_KEY, []):
@@ -365,27 +410,50 @@ def _sync_generated(pipeline_result: Mapping[str, Any], fingerprint: str) -> Opt
     return guide
 
 
+def _request_stop(fingerprint: str) -> None:
+    job = _reattach_job(fingerprint)
+    if job is not None:
+        guide_jobs.jobs.request_stop(job.job_id)
+
+
 @st.fragment(run_every=2)
-def _poll_generation(fingerprint: str) -> None:
-    """Show live progress; do a full rerun when statements arrive or the job ends."""
-    job = guide_jobs.jobs.get(st.session_state.get(GUIDE_JOB_KEY))
+def _poll_generation(fingerprint: str, total: int) -> None:
+    """Show live progress from SQLite; rerun when the job ends or items arrive."""
+    job = _reattach_job(fingerprint)
     guide = get_guide()
     shown = {i.item_id for i in guide.all_items()} if guide else set()
     stored = _stored_items(fingerprint)
-    if job is None or not job.active or not set(stored) <= shown:
-        st.rerun()
-    total = job.total
-    done = min(len(stored), total)
+    done = min(len(stored), total) if total else len(stored)
     failed = sum(1 for i in stored.values() if i.generation_failed)
     fraction = done / total if total else 0.0
     suffix = f" · {failed} failed" if failed else ""
-    st.progress(fraction, text=f"{done} / {total} generated — {int(fraction * 100)}%{suffix}")
-    st.info(
-        f"Writing patient-friendly statements with {provider_display_name()} and "
-        "checking each one. Finished statements appear below and can be "
-        "approved, edited or rejected now. Generation keeps running if you "
-        "leave this page, and finished statements are kept."
-    )
+
+    if job is None or not job.active:
+        st.rerun()
+        return
+    if not set(stored) <= shown:
+        st.rerun()
+        return
+
+    if job.status == guide_jobs.STOPPING:
+        st.warning(
+            f"Stopping… waiting for in-flight requests to finish. "
+            f"{done} of {total} statements saved so far."
+        )
+    else:
+        st.progress(
+            fraction,
+            text=f"{done} / {total} generated — {int(fraction * 100)}%{suffix}",
+        )
+        st.info(
+            f"Writing patient-friendly statements with {provider_display_name()} "
+            f"(up to {os.getenv('CTAI_GUIDE_WORKERS', '4')} at a time) and checking "
+            "each one. Finished statements appear below and can be approved, edited "
+            "or rejected now. Generation keeps running if you leave this page."
+        )
+    if st.button("Stop generating", key="guide_stop_btn"):
+        _request_stop(fingerprint)
+        st.rerun()
 
 
 def _ensure_guide(pipeline_result: Mapping[str, Any]) -> Optional[PatientGuide]:
@@ -393,10 +461,12 @@ def _ensure_guide(pipeline_result: Mapping[str, Any]) -> Optional[PatientGuide]:
     The guide for this analysis, which may still be generating.
 
     Statements appear as they are finished. Returns None only before the first
-    statement exists. A complete saved guide is reused as is; an interrupted
-    one resumes once automatically, then offers a retry for failed work.
+    statement exists. Incomplete or paused runs offer Resume; completed work in
+    SQLite is never regenerated.
     """
     fingerprint = analysis_fingerprint(pipeline_result)
+    analysis = pipeline_result["analysis"]
+    total = count_statements(analysis)
     guide = get_guide()
     source = st.session_state.get(GUIDE_SOURCE_KEY)
     if guide is not None and source is not None and source != fingerprint:
@@ -407,28 +477,36 @@ def _ensure_guide(pipeline_result: Mapping[str, Any]) -> Optional[PatientGuide]:
 
     _collect_generation(fingerprint)
     guide = _sync_generated(pipeline_result, fingerprint)
+    stored = _stored_items(fingerprint)
+    saved = len(stored)
+
     if guide is not None and guide.generation_complete:
+        st.session_state[GUIDE_PAUSED_KEY] = False
         return guide
 
-    job_active = guide_jobs.jobs.get(st.session_state.get(GUIDE_JOB_KEY)) is not None
-    if job_active:
-        _poll_generation(fingerprint)
+    job = _reattach_job(fingerprint)
+    if job is not None and job.active:
+        _poll_generation(fingerprint, total)
         return guide
 
     error = st.session_state.get(GUIDE_ERROR_KEY)
     failed = guide is not None and any(
         i.generation_failed and not i.rejected for i in guide.all_items()
     )
+    paused = bool(st.session_state.get(GUIDE_PAUSED_KEY)) or (
+        saved < total and st.session_state.get(GUIDE_AUTOSTART_KEY) == fingerprint
+    )
+
     if error:
         st.error(
             f"Could not generate the patient statements: {error}\n\n"
             "Your uploaded protocol, analysis and finished statements are kept."
         )
-        if st.button("Retry generation", type="primary", key="guide_retry_btn"):
+        if st.button("Resume generation", type="primary", key="guide_retry_btn"):
             _start_generation(pipeline_result, fingerprint, retry_failed=True)
             st.rerun()
         return guide
-    if failed:
+    if failed and not paused:
         count = sum(1 for i in guide.all_items() if i.generation_failed and not i.rejected)
         st.warning(
             f"{count} statement(s) could not be generated. Everything else is "
@@ -438,11 +516,25 @@ def _ensure_guide(pipeline_result: Mapping[str, Any]) -> Optional[PatientGuide]:
             _start_generation(pipeline_result, fingerprint, retry_failed=True)
             st.rerun()
         return guide
+    if paused and saved < total:
+        st.warning(
+            f"Generation paused — {saved} of {total} statements saved. "
+            "Completed statements, approvals and edits are kept. Resume only "
+            "generates the missing ones."
+        )
+        if st.button("Resume generation", type="primary", key="guide_resume_btn"):
+            st.session_state[GUIDE_PAUSED_KEY] = False
+            _start_generation(pipeline_result, fingerprint)
+            st.rerun()
+        return guide
     if st.session_state.get(GUIDE_AUTOSTART_KEY) != fingerprint:
         _start_generation(pipeline_result, fingerprint)
         st.rerun()
-    st.warning("Statement generation stopped before finishing.")
-    if st.button("Resume generation", type="primary", key="guide_retry_btn"):
+    st.warning(
+        f"Statement generation stopped before finishing "
+        f"({saved} of {total} saved)."
+    )
+    if st.button("Resume generation", type="primary", key="guide_resume_btn"):
         _start_generation(pipeline_result, fingerprint)
         st.rerun()
     return guide
@@ -707,10 +799,13 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
     if guide is None:
         return False
 
+    fingerprint = analysis_fingerprint(pipeline_result)
+    stored_count = len(_stored_items(fingerprint))
     counts = state_counts(guide)
     total = counts[ALL]
-    expected = max(guide.generation_total or total, total)
+    expected = max(guide.generation_total or total, count_statements(pipeline_result["analysis"]), total)
     generating = not guide.generation_complete
+    display_total = max(total, stored_count)
     pending = counts[PENDING]
     accepted = counts[APPROVED] + counts[EDITED]
     rejected = counts[REJECTED]
@@ -730,11 +825,17 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
     decided = accepted + rejected
     active_filter = st.session_state.setdefault(FILTER_KEY, ALL)
 
+    if generating:
+        st.caption(
+            f"Saved progress: **{stored_count} / {expected}** statements in SQLite "
+            "(updates automatically; a sleeping browser tab does not stop the job)."
+        )
+
     # Sticky review-status bar: clickable counts on the left, Approve all on the right.
     bar = st.container(key="review_bar")
     with bar:
         stats, approve_col = st.columns([6, 2], vertical_alignment="center")
-        total_text = f"{total} / {expected}" if generating else str(total)
+        total_text = f"{display_total} / {expected}" if generating else str(total)
         filters = (
             (ALL, "Total", total_text),
             (APPROVED, "Approved", accepted),
@@ -852,6 +953,33 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
             )
     if visible == 0:
         st.info("No statements match this filter.")
+
+    if guide.generation_complete and guide.all_items():
+        findings = audit_guide_quality(guide)
+        if findings:
+            grouped = group_findings(findings)
+            labels = {
+                "exact_duplicate": "Exact duplicates",
+                "near_duplicate": "Near-duplicates",
+                "technical": "Possibly technical / coordinator-only",
+                "weak_source": "Weak source support",
+            }
+            with st.expander(
+                f"Quality audit — {len(findings)} possible concern(s) "
+                "(no automatic changes)",
+                expanded=False,
+            ):
+                st.caption(
+                    "Review only — nothing is deleted, merged, approved or rejected "
+                    "automatically. Different doses, visit times, arms and risks "
+                    "are kept separate."
+                )
+                for kind, rows in grouped.items():
+                    st.markdown(f"**{labels.get(kind, kind)}** ({len(rows)})")
+                    for row in rows[:40]:
+                        st.markdown(f"- {row.summary}. _{row.detail}_")
+                    if len(rows) > 40:
+                        st.caption(f"…and {len(rows) - 40} more in this group.")
 
     render_add_statement(guide, pipeline_result, persist_review)
 

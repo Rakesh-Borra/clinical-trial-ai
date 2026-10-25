@@ -96,6 +96,9 @@ class ProtocolChunk:
     categories: tuple[str, ...] = ()
     fully_classified: bool = False
     has_table: bool = False
+    # Stable ids of the kept source blocks packed into this chunk (empty when
+    # chunks were built from raw page text rather than filtered blocks).
+    source_block_ids: tuple[int, ...] = ()
 
     @property
     def character_count(self) -> int:
