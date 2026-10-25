@@ -1129,6 +1129,35 @@ LANDING_CSS = """
   background: rgba(169,201,214,.1);
   color: var(--landing-text);
 }
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stElementContainer"]:has([data-testid="stRadio"]),
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadio"] {
+  width: 100%;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioGroup"] {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: .6rem;
+  width: 100%;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] > div > div:first-child:not(:only-child) {
+  display: none;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] p {
+  overflow-wrap: normal;
+  word-break: normal;
+  text-align: center;
+  width: 100%;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioGroup"] > div,
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] {
+  width: 100%;
+  box-sizing: border-box;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] {
+  justify-content: center;
+  margin: 0;
+  min-width: 0;
+}
 .stApp:has(.st-key-landing_shell) .ctai-demo-notice {
   margin-top: 1rem;
   padding: .75rem .85rem;

@@ -287,15 +287,18 @@ If the terminal prints a different Local URL, use that URL instead.
 
 Sign-in uses real accounts stored in the same SQLite file as the review data (`data/ctai.db`, or `CTAI_DB_PATH`). Passwords are hashed with Argon2id; sessions last 8 hours or until you log out; five failed sign-ins lock an account for 15 minutes.
 
-- **Patients** register themselves on the welcome page (**Create account**). Public registration can only create patient accounts.
-- **Coordinators** are created by an administrator on the machine running the app (the password is prompted for, never passed on the command line):
+- **Patients** register themselves on the welcome page (**Create account**, Patient card).
+- **Coordinators** choose the Coordinator card and enter an administrator-issued, single-use invitation code (hashed in SQLite, expires in 72 h). Administrators create codes and accounts on the machine running the app (passwords are prompted for, never passed on the command line):
 
   ```bash
+  python -m scripts.manage_users create-invite
   python -m scripts.manage_users create-coordinator --email you@example.org --name "Your Name"
-  python -m scripts.manage_users promote --email existing@example.org     # patient -> coordinator
-  python -m scripts.manage_users reset-password --email you@example.org
+  python -m scripts.manage_users promote --email existing@example.org --role patient   # patient -> coordinator
+  python -m scripts.manage_users reset-password --email you@example.org --role coordinator
   ```
 
+- **One email, two accounts:** the same email may hold one Patient and one Coordinator account (unique per email + role). Each has its own password, sessions and profile. Sign-in, password reset and admin commands use the selected role; a wrong role gives the same generic error as a wrong password.
+- **Classroom demo mode (local only):** set `CTAI_DEMO_MODE=true` and the coordinator code `0000` is accepted. This is demo access, not production security; never enable it in a shared or deployed environment. Without it, `0000` is rejected.
 - **Password recovery** emails a single-use reset code (valid 30 minutes). It needs SMTP settings in the environment: `CTAI_SMTP_HOST`, `CTAI_SMTP_FROM` (required), `CTAI_SMTP_PORT` (default 587), `CTAI_SMTP_USER`, `CTAI_SMTP_PASSWORD`, and `CTAI_APP_URL` (adds a clickable link). Without them the app says recovery is unavailable; an administrator can use `reset-password` instead. Keep these values in your environment or an untracked `.env`, never in Git.
 - There is no "remember me": a session ends when the browser tab closes or you log out.
 

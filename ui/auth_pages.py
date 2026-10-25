@@ -29,10 +29,35 @@ def _sign_in_user(user: dict) -> None:
     sign_in(user, token)
 
 
+ROLE_CHOICES = {
+    auth.PATIENT: "Patient",
+    auth.COORDINATOR: "Coordinator",
+}
+ROLE_HINTS = {
+    auth.PATIENT: "Read approved study information and ask questions.",
+    auth.COORDINATOR: "Upload, review, approve and publish protocols.",
+}
+
+
+def _role_cards(key: str) -> str:
+    """Two selectable role cards; Patient is the default."""
+    role = st.radio(
+        "I am a",
+        list(ROLE_CHOICES),
+        format_func=ROLE_CHOICES.get,
+        horizontal=True,
+        key=key,
+        label_visibility="collapsed",
+    )
+    st.caption(ROLE_HINTS[role])
+    return role
+
+
 def _login_form() -> None:
     notice = st.session_state.pop(NOTICE_KEY, None)
     if notice:
         st.success(notice)
+    role = _role_cards("auth_login_role")
     with st.form("auth_login_form", border=False):
         email = st.text_input("Email", key="auth_login_email", autocomplete="username")
         password = st.text_input(
@@ -42,7 +67,7 @@ def _login_form() -> None:
         submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
     if submitted:
         try:
-            user = auth.authenticate(email, password)
+            user = auth.authenticate(email, password, role)
         except auth.AuthError as exc:
             st.error(str(exc))
         else:
@@ -53,6 +78,7 @@ def _login_form() -> None:
 
 
 def _register_form() -> None:
+    role = _role_cards("auth_reg_role")
     st.caption(auth.PASSWORD_GUIDANCE)
     with st.form("auth_register_form", border=False):
         name = st.text_input("Full name", key="auth_reg_name", autocomplete="name")
@@ -65,18 +91,29 @@ def _register_form() -> None:
             "Confirm password", type="password", key="auth_reg_confirm",
             autocomplete="new-password",
         )
+        invite = ""
+        if role == auth.COORDINATOR:
+            if auth.demo_mode():
+                st.markdown(f"**{auth.DEMO_CODE_HINT}**")
+                st.caption(auth.DEMO_LABEL)
+            invite = st.text_input(
+                "Invitation code", type="password", key="auth_reg_invite",
+                help="Issued by your administrator. Single use; it expires automatically.",
+            )
         submitted = st.form_submit_button(
-            "Create patient account", type="primary", use_container_width=True
+            f"Create {ROLE_CHOICES[role].lower()} account", type="primary",
+            use_container_width=True,
         )
     if submitted:
         try:
-            auth.register_patient(name, email, password, confirm)
+            auth.register_account(name, email, password, confirm, role, invite)
         except auth.AuthError as exc:
             st.error(str(exc))
         else:
             st.session_state[NOTICE_KEY] = "Account created. Please sign in."
             _go(LOGIN)
-    st.caption("Accounts created here are patient accounts. Coordinator accounts are set up by an administrator.")
+    if role == auth.COORDINATOR and not auth.demo_mode():
+        st.caption("Coordinator accounts need an invitation code issued by an administrator.")
     _link("Back to sign in", LOGIN, "auth_reg_back")
 
 
@@ -87,6 +124,7 @@ def _forgot_form() -> None:
             "configured. Ask your administrator to reset your password."
         )
     else:
+        role = _role_cards("auth_forgot_role")
         with st.form("auth_forgot_form", border=False):
             email = st.text_input("Email", key="auth_forgot_email", autocomplete="email")
             submitted = st.form_submit_button(
@@ -94,7 +132,7 @@ def _forgot_form() -> None:
             )
         if submitted:
             try:
-                st.info(auth.request_password_reset(email))
+                st.info(auth.request_password_reset(email, role))
             except auth.AuthError as exc:
                 st.error(str(exc))
         _link("I have a reset code", RESET, "auth_to_reset")

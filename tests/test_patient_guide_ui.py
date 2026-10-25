@@ -211,6 +211,11 @@ def _submit(at, label):
 
 
 def _ui_login(at, email, password="Passw0rd-test-123"):
+    from services import auth
+
+    stored = auth.get_user_by_email(email)
+    if stored:
+        at.radio(key="auth_login_role").set_value(stored["role"])
     at.text_input(key="auth_login_email").set_value(email)
     at.text_input(key="auth_login_password").set_value(password)
     return _submit(at, "Sign in")
@@ -233,7 +238,7 @@ def test_app_opens_on_welcome_page():
     assert "Sign in" in html_text
     assert any("#090B0F" in str(item.value) for item in at.get("markdown"))
     assert {"auth_login_email", "auth_login_password"} <= {w.key for w in at.text_input}
-    assert not at.radio
+    assert [r.key for r in at.radio] == ["auth_login_role"]
     keys = {b.key for b in at.button}
     assert {"home_btn", "auth_to_forgot", "auth_to_register"} <= keys
     assert not at.toggle

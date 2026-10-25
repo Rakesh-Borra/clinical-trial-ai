@@ -8,7 +8,7 @@ from services import auth, authz
 def sign_in_as(session_state, role: str, email: str | None = None) -> dict:
     """Create a user with `role`, open a real session and store its token."""
     address = email or f"{role}@example.test"
-    user = auth.get_user_by_email(address) or auth.create_user(
+    user = auth.get_user_by_email(address, role) or auth.create_user(
         f"Test {role.title()}", address, "Passw0rd-test-123", role
     )
     session_state[authz.TOKEN_KEY] = auth.create_session(user["id"])
