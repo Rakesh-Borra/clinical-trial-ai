@@ -1264,27 +1264,56 @@ REVIEW_BAR_CSS = f"""
 {_RB} .st-key-topbar {{ background:#0E1218; margin-bottom:0; height:50px; }}
 {_RB} [data-testid="stLayoutWrapper"]:has(> .st-key-review_bar) {{ position:sticky; top:54px; z-index:290; }}
 {_RB} .st-key-review_bar {{
-  position:relative; box-sizing:border-box; min-height:58px; max-width:100%; overflow:hidden;
+  position:relative; box-sizing:border-box; min-height:58px; max-width:100%; overflow:visible;
   padding:.4rem .8rem .55rem; gap:0; background:#0E1218;
   border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.28);
 }}
 {_RB} .st-key-review_bar [data-testid="stHorizontalBlock"] {{ gap:.6rem; flex-wrap:nowrap; align-items:center; }}
-{_RB} .st-key-review_bar [data-testid="stColumn"] {{ min-width:0; }}
-{_RB} .ctai-rbar-stats {{ display:flex; flex-wrap:wrap; gap:.25rem 1.1rem; align-items:baseline; font-size:.78rem; color:var(--body); }}
-{_RB} .ctai-rstat b {{ margin-left:.35rem; font-size:.95rem; color:var(--ink); font-weight:750; }}
-{_RB} .ctai-rstat.ok b {{ color:#59B3A6; }}
-{_RB} .ctai-rstat.warn b {{ color:#E3B15C; }}
-{_RB} .ctai-rstat.bad b {{ color:#E58A8A; }}
-{_RB} .st-key-review_bar .stButton > button,
-{_RB} .st-key-review_bar [data-testid="stPopoverButton"] {{ min-height:2.1rem; padding:.2rem .7rem; font-size:.82rem; }}
+{_RB} .st-key-review_bar > div > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {{
+  flex:1 1 auto; min-width:0;
+}}
+{_RB} .st-key-review_bar > div > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child {{
+  flex:0 0 auto; width:auto !important; min-width:max-content;
+}}
+/* Filter pills size to their full label + count; never ellipsize. */
+{_RB} .st-key-review_bar .st-key-guide_filters [data-testid="stHorizontalBlock"] {{
+  gap:.35rem; flex-wrap:wrap; align-items:center;
+}}
+{_RB} .st-key-review_bar .st-key-guide_filters [data-testid="stColumn"] {{
+  flex:0 0 auto !important; width:auto !important; min-width:max-content !important;
+}}
+{_RB} .st-key-review_bar .st-key-guide_filters .stButton,
+{_RB} .st-key-review_bar .st-key-guide_filters .stButton > button {{
+  width:auto !important; min-width:max-content;
+}}
+{_RB} .st-key-review_bar .st-key-guide_filters .stButton > button {{
+  min-height:2rem; padding:.15rem .75rem; font-size:.78rem; border-radius:999px;
+  white-space:nowrap; overflow:visible; text-overflow:clip;
+  background:rgba(255,255,255,.03); border:1px solid rgba(205,215,230,.14); color:#B8C2CF;
+}}
+{_RB} .st-key-review_bar .st-key-guide_filters .stButton > button p {{
+  margin:0; white-space:nowrap; overflow:visible; text-overflow:clip;
+}}
+{_RB} .st-key-review_bar .st-key-guide_filters .stButton > button:hover {{
+  color:var(--ink); border-color:rgba(110,190,185,.45);
+}}
+{_RB} .st-key-review_bar .st-key-guide_filters .stButton > button[data-testid="stBaseButton-primary"] {{
+  background:rgba(42,143,138,.24); border-color:rgba(94,201,194,.6); color:#E6F7F5;
+  box-shadow:0 0 0 1px rgba(94,201,194,.18) inset;
+}}
+{_RB} .st-key-review_bar .stButton > button {{ min-height:2.1rem; padding:.2rem .7rem; font-size:.82rem; }}
 {_RB} .st-key-review_bar [data-testid="stElementContainer"]:has(.ctai-rbar-progress) {{
   position:absolute; left:0; right:0; bottom:0; height:3px; margin:0; }}
 {_RB} .ctai-rbar-progress {{ height:3px; background:rgba(255,255,255,.08); }}
 {_RB} .ctai-rbar-progress > div {{ height:100%; background:linear-gradient(90deg,#2A7D74,#59B3A6); transition:width .4s ease; }}
 @media (max-width: 900px) {{
   {_RB} .st-key-review_bar [data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; flex-direction:row !important; }}
-  {_RB} .st-key-review_bar [data-testid="stColumn"]:first-child {{ flex:1 1 100% !important; width:100% !important; }}
-  {_RB} .st-key-review_bar [data-testid="stColumn"]:not(:first-child) {{ flex:1 1 calc(50% - .6rem) !important; width:auto !important; }}
+  {_RB} .st-key-review_bar > div > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {{
+    flex:1 1 100% !important; width:100% !important;
+  }}
+  {_RB} .st-key-review_bar > div > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child {{
+    flex:0 0 auto !important; width:auto !important; margin-left:auto;
+  }}
 }}
 """
 

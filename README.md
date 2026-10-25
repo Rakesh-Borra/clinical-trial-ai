@@ -1,5 +1,5 @@
 # Clinical Trial AI
-
+ ok
 An AI-assisted prototype that helps clinical trial coordinators turn dense protocol PDFs into **source-linked, coordinator-approved patient information**, and lets patients ask questions answered only from that approved, published content.
 
 **Repository:** [https://github.com/Rakesh-Borra/clinical-trial-ai](https://github.com/Rakesh-Borra/clinical-trial-ai)
@@ -129,7 +129,7 @@ The model context window is 16,384 tokens by default. On a computer with 8 GB of
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CTAI_MODEL_PROVIDER` | `ollama` | `ollama` (supported) or `openrouter` (see below) |
+| `LLM_PROVIDER` | `ollama` | `ollama` or `openrouter` (see below). The older `CTAI_MODEL_PROVIDER` still works |
 | `CTAI_DB_PATH` | `data/ctai.db` | SQLite file for drafts, publications, history, analysis cache |
 | `CTAI_NUM_CTX` | `16384` | Ollama context window |
 | `CTAI_EXTRACTION_NUM_PREDICT` | `6144` | Output token cap for extraction |
@@ -142,9 +142,19 @@ The model context window is 16,384 tokens by default. On a computer with 8 GB of
 | `CTAI_ANALYSIS_MAX_SECONDS` | `1800` | Analysis time budget |
 | `CTAI_CHAT_LLM` | `0` | Optional model rewording of chat answers |
 
-### OpenRouter (planned, not yet validated)
+### OpenRouter (optional cloud provider)
 
-`services/model_provider.py` contains an opt-in OpenRouter code path (`CTAI_MODEL_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `CTAI_OPENROUTER_MODEL`). It has **not** been validated end-to-end and the full integration is planned future work. **Ollama with `qwen3:4b` is the supported configuration.** If you try it, supply the key via the process environment only (the app does not load `.env`), and confirm you are authorised to send protocol text to a cloud service. Selecting OpenRouter does not change the input or call caps.
+Set `LLM_PROVIDER=openrouter` to send the existing prompts through OpenRouter's OpenAI-compatible API instead of Ollama. All agents (protocol analysis, verification checks, patient statements, summary, patient chat rewording) share `services/model_provider.py`, so prompts, JSON-schema validation, citations, guardrails and coordinator approval are unchanged. If OpenRouter fails, the error is shown; the app never falls back to Ollama silently.
+
+Copy `.env.example` to `.env` (Git ignores it) and fill in the key locally. The app loads `.env` at start-up without overriding real environment variables.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | (none) | Your key. Read from the environment only; never printed, logged or put in error messages |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Must start with `https://` |
+| `OPENROUTER_MODEL` | `openai/gpt-4.1-mini` | Model id (`CTAI_OPENROUTER_MODEL` still works) |
+
+`openai/gpt-4.1-mini` was chosen because it supports strict JSON-schema output (which the validators rely on), has a 1M-token context so long protocols need fewer chunks, and is inexpensive. It has not been run against this project yet. Requests ask OpenRouter for zero data retention and no data collection, with provider fallbacks disabled; if the model has no such endpoint the request fails with an error rather than relaxing those settings. The analysis cache is keyed by provider and model, so changing the model re-analyzes. Confirm you are authorised to send protocol text to a cloud service. Ollama with `qwen3:4b` remains the default.
 
 ---
 
@@ -406,7 +416,7 @@ clinical-trial-ai/
 │   ├── guide_review.py             # Review states, publish validation, patient-visible snapshot
 │   ├── review_store.py             # SQLite drafts, publications, history
 │   ├── chat_intents.py / chat_grounding.py  # Chat intents, typo handling, grounding checks
-│   ├── model_provider.py           # Model-provider abstraction (Ollama; OpenRouter path unvalidated)
+│   ├── model_provider.py           # Model-provider abstraction (Ollama default; optional OpenRouter)
 │   └── patient_query.py            # Wrapper over the legacy deterministic Q&A
 ├── models/                         # Pydantic models (protocol, patient, plain-language guide)
 ├── ui/                             # theme, landing/sign-in, patient view, review tab, chat store

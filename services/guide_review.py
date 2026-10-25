@@ -23,10 +23,17 @@ from agents.plain_language_agent import (
     approval_block_reason,
     active_overrides,
     item_cleared,
+    override_valid,
     safety_blockers,
+    verification_warnings,
 )
 from models.patient_models import PatientAnswer
-from models.plain_language_models import GlossaryTerm, GuideItem, PatientGuide
+from models.plain_language_models import (
+    GlossaryTerm,
+    GuideItem,
+    PatientGuide,
+    as_patient_guide,
+)
 
 PENDING = "pending"
 APPROVED = "approved"
@@ -87,7 +94,20 @@ def state_counts(guide: PatientGuide) -> Dict[str, int]:
 
 
 def matches_filter(item: GuideItem, key: str) -> bool:
-    return key == ALL or review_state(item) == key
+    """
+    Whether a statement belongs in a status-bar filter.
+
+    Approved includes edited-and-approved (same as the Approved count).
+    Edited means the wording was changed by the coordinator, regardless of
+    the current decision.
+    """
+    if key == ALL:
+        return True
+    if key == EDITED:
+        return item.generated_by == "coordinator"
+    if key == APPROVED:
+        return review_state(item) in (APPROVED, EDITED)
+    return review_state(item) == key
 
 
 def reconsider_item(item: GuideItem) -> None:
@@ -104,14 +124,24 @@ def edit_problems(item: GuideItem) -> List[str]:
 
 
 def override_confirmation_reason(guide: PatientGuide) -> Optional[str]:
-    """Human overrides must be confirmed as a set before publishing."""
-    overrides = active_overrides(guide)
-    ids = sorted(i.item_id for i in overrides)
-    if overrides and ids != sorted(guide.overrides_confirmed):
+    """
+    Approve on a flagged statement is the human override confirmation.
+
+    Block only when an approved statement still carries verification warnings
+    without a valid recorded override (e.g. approved=True was forced). A
+    leftover entry in overrides_confirmed is harmless and never invented here.
+    """
+    missing = [
+        i for i in guide.all_items()
+        if i.approved and not i.rejected
+        and verification_warnings(i)
+        and not override_valid(i)
+    ]
+    if missing:
         return (
-            f"Cannot publish: {len(overrides)} statement(s) were approved over "
-            "an AI verification warning. Review and confirm these human "
-            "overrides before publishing."
+            f"Cannot publish: {len(missing)} statement(s) were approved over "
+            "an AI verification warning without a recorded coordinator "
+            "override. Approve each flagged statement to record the decision."
         )
     return None
 
@@ -187,6 +217,9 @@ def build_published_snapshot(guide: PatientGuide) -> PatientGuide:
     Rejected statements, their original protocol text and their glossary
     terms are absent from the copy, so nothing downstream can retrieve them.
     """
+    guide = as_patient_guide(guide)
+    if guide is None:
+        raise TypeError("The patient guide could not be read.")
     snapshot = guide.model_copy(deep=True)
     snapshot.generation_complete = guide.generation_complete
     seen: set[str] = set()
@@ -206,6 +239,8 @@ def build_published_snapshot(guide: PatientGuide) -> PatientGuide:
                     seen.add(term.term)
                     glossary.append(term)
     snapshot.glossary = glossary
+    active = {i.item_id for i in snapshot.all_items() if i.override}
+    snapshot.overrides_confirmed = sorted(active & set(guide.overrides_confirmed))
     return snapshot
 
 

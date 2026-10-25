@@ -246,18 +246,21 @@ def test_missing_mandatory_safety_section_blocks_publication(marker, section, pu
     assert publish_block_reason(guide, result) is None
 
 
-def test_edited_statement_must_pass_verification_before_approval_or_publication():
+def test_edited_statement_with_warnings_can_be_approved_as_an_override():
     result = _eight_statement_result()
     guide = _approved_guide(result)
     item = _item(guide, "inclusion condition 2")
     warnings = edit_item(item, "Participants must meet the second condition.")
     assert warnings
     at = _prepare_review_app(result, guide)
-    assert at.button(key=gk(at, 0, 1, "approve")).disabled
+    # Warning is advisory: Approve stays enabled and records the override.
+    assert not at.button(key=gk(at, 0, 1, "approve")).disabled
     assert at.button(key="publish_protocol_btn").disabled
-    # Even if approval were forced, publication still refuses it.
+    # Forced approval without a recorded override still refuses publication.
     item.approved = True
     assert "decision" in decision_block_reason(guide)
+    approve_item(item)
+    assert item.override and decision_block_reason(guide) is None
 
 
 def test_statement_that_points_at_a_rejected_neighbour_blocks_publication():
@@ -388,10 +391,10 @@ def _cards(at):
     return [b.key for b in at.button if b.key and b.key.endswith("_save")]
 
 
-def test_review_page_has_no_filters_and_shows_every_statement():
+def test_review_page_default_filter_shows_every_statement():
     result, guide = _mixed_guide()
     at = _prepare_review_app(result, guide)
-    assert not [b for b in at.button if b.key and b.key.startswith("guide_filter_")]
+    assert {b.key for b in at.button if b.key and b.key.startswith("guide_filter_")}
     assert len(_cards(at)) == 8  # rejected statements stay visible for audit
 
 

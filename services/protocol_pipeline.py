@@ -35,11 +35,11 @@ PROTOCOL_RESCUE_MAX_CHARS = int(
 
 def _analysis_settings() -> dict:
     from agents import protocol_analysis_agent as agent
-    from services.model_provider import provider_display_name
+    from services.model_provider import active_model_id, provider_display_name
 
     return {
         "provider": provider_display_name(),
-        "model": agent.MODEL_NAME,
+        "model": active_model_id(agent.MODEL_NAME),
         "version": agent.ANALYSIS_VERSION,
         "think": agent.EXTRACTION_THINK,
         "num_predict": agent.NUM_PREDICT,

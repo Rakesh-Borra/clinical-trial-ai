@@ -70,7 +70,7 @@ def test_review_page_has_four_sections_and_no_clutter():
     at = _app()
     keys = {b.key for b in at.button}
     assert {"add_stmt_open_btn", "publish_protocol_btn"} <= keys
-    assert not [k for k in keys if k and k.startswith("guide_filter_")]
+    assert {"guide_filter_all", "guide_filter_approved", "guide_filter_pending"} <= keys
     summary = [e for e in at.expander if e.label == "Patient Summary"]
     assert len(summary) == 1 and summary[0].proto.expanded is False
     text = " ".join(str(getattr(e, "value", "")) for e in list(at.markdown) + list(at.subheader))
@@ -129,8 +129,8 @@ def test_unsupported_manual_statement_is_never_marked_verified():
     (item,) = _manual(at)
     assert item.source_status == "unverified" and item.needs_review
     assert item.verification != "verified"
-    with pytest.raises(ValueError):  # approving needs a recorded override
-        approve_item(item)
+    approve_item(item)  # Approve records the override; wording stays unverified
+    assert item.approved and item.override and item.source_status == "unverified"
 
 
 def test_manual_statement_without_pdf_text_says_verification_unavailable():
@@ -253,7 +253,7 @@ def test_saved_edit_must_be_reapproved_then_publishes_the_approved_summary():
     at.text_area(key=_summary_key()).set_value(new_text)
     at = _click(at.run(), "summary_save_btn")
     assert at.button(key="publish_protocol_btn").disabled  # approval invalidated
-    at = _click(at, "summary_approve_btn")
+    at = _review_and_approve(at)
     assert not at.button(key="publish_protocol_btn").disabled
     at = _click(at, "publish_protocol_btn")
     published = review_store.load_publications()["protocol-eight"]["guide"]
@@ -296,3 +296,174 @@ def test_review_writes_are_denied_to_patients_server_side():
     sign_in_as(at.session_state, "patient")
     at = at.run()
     assert [m.value for m in at.markdown] == ["denied"]
+
+
+# --- Approve Summary sits below the collapsed section ----------------------
+
+def _review_and_approve(at):
+    at.checkbox(key=_reviewed_key(at)).check()
+    return _click(at.run(), "summary_approve_btn")
+
+
+def _reviewed_key(at):
+    return next(c.key for c in at.checkbox if (c.key or "").startswith("summary_reviewed_"))
+
+
+def _unapproved_app():
+    at = _app()
+    review_store.withdraw_summary_approval("protocol-eight")
+    return at.run()
+
+
+def test_approve_button_is_outside_the_collapsed_expander_and_not_duplicated():
+    at = _unapproved_app()
+    summary = next(e for e in at.expander if e.label == "Patient Summary")
+    assert not summary.proto.expanded
+    assert [b.key for b in at.button].count("summary_approve_btn") == 1
+    assert "summary_approve_btn" not in [b.key for b in summary.button]
+    assert "summary_approve_btn" not in [b.key for b in summary.children.values() if hasattr(b, "key")]
+
+
+def test_approval_is_blocked_until_the_summary_has_been_reviewed():
+    at = _unapproved_app()
+    assert at.button(key="summary_approve_btn").disabled
+    assert at.button(key="publish_protocol_btn").disabled
+    at.checkbox(key=_reviewed_key(at)).check()
+    at = at.run()
+    assert not at.button(key="summary_approve_btn").disabled
+    assert at.button(key="publish_protocol_btn").disabled  # still needs the approval itself
+
+
+def test_approving_after_review_shows_status_and_hides_the_button():
+    at = _review_and_approve(_unapproved_app())
+    assert "summary_approve_btn" not in [b.key for b in at.button]
+    assert any(s.value == "Summary Approved" for s in at.success)
+    assert not at.button(key="publish_protocol_btn").disabled
+
+
+def test_editing_an_approved_summary_requires_review_and_approval_again():
+    at = _review_and_approve(_unapproved_app())
+    old_key = [c.key for c in at.checkbox if (c.key or "").startswith("summary_reviewed_")]
+    at.text_area(key=_summary_key()).set_value(GENERIC_SUMMARY + " Questions are welcome.")
+    at = _click(at.run(), "summary_save_btn")
+    assert not any(s.value == "Summary Approved" for s in at.success)
+    assert at.button(key="summary_approve_btn").disabled  # the earlier tick does not carry over
+    assert at.button(key="publish_protocol_btn").disabled
+    assert old_key == [] or _reviewed_key(at) not in old_key
+    at = _review_and_approve(at)
+    assert not at.button(key="publish_protocol_btn").disabled
+
+
+# --- final approval validation: stale override confirmation -----------------
+
+def _guide_with_stale_override_confirmation():
+    from agents.plain_language_agent import approve_item
+
+    guide = _approved_guide()
+    item = guide.all_items()[0]
+    item.source_status = "unverified"
+    approve_item(item, "checked the protocol page")
+    guide.overrides_confirmed = [item.item_id]
+    item.source_status = "verified"  # later re-verified: the override no longer exists
+    approve_item(item)
+    return guide, item
+
+
+def test_stale_override_confirmation_does_not_block_a_fully_approved_guide():
+    from services.guide_review import build_published_snapshot
+    from ui.patient_guide_tab import final_validation_reason
+
+    guide, item = _guide_with_stale_override_confirmation()
+    assert guide.overrides_confirmed == [item.item_id]
+    snapshot = build_published_snapshot(guide)
+    assert final_validation_reason(snapshot) is None
+    assert snapshot.overrides_confirmed == []
+
+
+def test_publish_is_enabled_with_stale_override_confirmation_and_acknowledged_gaps():
+    at = _app()
+    guide, _ = _guide_with_stale_override_confirmation()
+    at.session_state["patient_guide"] = guide
+    at = at.run()
+    assert not at.button(key="publish_protocol_btn").disabled
+    assert not any("final approval validation" in e.value for e in list(at.error) + list(at.warning))
+
+
+def test_recorded_override_publishes_without_a_second_confirmation_list():
+    from agents.plain_language_agent import approve_item
+
+    guide = _approved_guide()
+    item = guide.all_items()[0]
+    item.source_status = "unverified"
+    approve_item(item)
+    guide.overrides_confirmed = []  # Approve is enough; list is not required
+    assert gr_reason(guide) is None
+
+
+def test_forced_approval_without_override_still_blocks_publication():
+    guide = _approved_guide()
+    item = guide.all_items()[0]
+    item.source_status = "unverified"
+    item.approved = True  # no override recorded
+    assert gr_reason(guide)
+
+
+def gr_reason(guide):
+    from services.guide_review import decision_block_reason
+
+    return decision_block_reason(guide)
+
+
+def test_final_validation_names_the_failing_requirement():
+    from services.guide_review import build_published_snapshot
+    from ui.patient_guide_tab import final_validation_reason
+
+    guide = _approved_guide()
+    snapshot = build_published_snapshot(guide)
+    snapshot.all_items()[0].analysis_complete = False
+    assert "analysis verification" in final_validation_reason(snapshot)
+    snapshot = build_published_snapshot(guide)
+    snapshot.generation_complete = False
+    assert "generation" in final_validation_reason(snapshot)
+    snapshot = build_published_snapshot(guide)
+    snapshot.all_items()[0].approved = False
+    assert "not approved" in final_validation_reason(snapshot)
+
+
+def test_final_validation_accepts_rehydrated_guide_from_dump_or_foreign_class():
+    """
+    Session-held guides can fail isinstance(PatientGuide) after a module reload
+    or when restored as a dict. Re-validation must keep real approvals intact.
+    """
+    from models.plain_language_models import PatientGuide, as_patient_guide
+    from services.guide_review import build_published_snapshot
+    from ui.patient_guide_tab import final_validation_reason
+
+    guide = _approved_guide()
+    assert final_validation_reason(guide.model_dump()) is None
+    assert final_validation_reason(guide.model_dump_json()) == "The patient guide could not be read."
+
+    foreign = as_patient_guide(guide.model_dump())
+    assert isinstance(foreign, PatientGuide)
+    # Simulate a stale class identity: dump/validate still yields a readable guide.
+    snapshot = build_published_snapshot(foreign)
+    assert final_validation_reason(snapshot) is None
+    assert len(snapshot.all_items()) == len(guide.all_items())
+
+    at = _app()
+    at.session_state["patient_guide"] = guide.model_dump()
+    at = at.run()
+    assert isinstance(at.session_state["patient_guide"], PatientGuide)
+    assert not at.button(key="publish_protocol_btn").disabled
+    assert not any("could not be read" in (w.value or "") for w in at.warning)
+
+
+def test_acknowledged_missing_categories_do_not_trigger_final_validation_error():
+    from app import publish_block_reason  # noqa: F401  (import check)
+
+    at = _app()
+    for key in ("eligibility", "interventions", "visits", "procedures", "risks", "consent"):
+        review_store.clear_coverage_override("protocol-eight", key)
+    at = at.run()
+    reason = " ".join(m.value for m in list(at.warning) + list(at.error))
+    assert "final approval validation" not in reason

@@ -217,15 +217,14 @@ def test_verified_statement_is_approvable_while_another_is_flagged():
     assert good.approved
 
 
-def test_unverified_statement_cannot_be_approved_and_reason_is_shown():
+def test_unverified_statement_approve_records_override_and_keeps_ai_status():
     guide = _guide_with_one_bad_statement()
     bad = _find(guide, "blood glucose")
     assert approval_block_reason(bad) is None  # warnings are not blockers
     warnings = verification_warnings(bad)
     assert warnings and "Not verified" in warnings[0]
-    with pytest.raises(ValueError):  # approval needs an explicit override reason
-        approve_item(bad)
-    assert not bad.approved
+    approve_item(bad)  # Approve is the explicit override
+    assert bad.approved and bad.override and bad.source_status == "unverified"
 
 
 def test_unsupported_statement_can_be_rejected_and_never_reaches_patients():
@@ -259,8 +258,8 @@ def test_edited_statement_needs_source_support_before_approval():
     edit_item(bad, "Adults aged 18 to 70 years.")
     reverify_item(bad, source_page_text=PAGES[2])
     assert verification_warnings(bad)
-    with pytest.raises(ValueError):
-        approve_item(bad)
+    approve_item(bad)  # coordinator may approve over the advisory warning
+    assert bad.approved and bad.override
 
 
 # --- Coverage / critical categories ----------------------------------------
@@ -502,17 +501,19 @@ def test_legacy_items_load_unchecked_not_verified():
     assert all(i.approved for i in items)  # saved work is kept
 
 
-def test_legacy_items_cannot_be_approved_published_or_bulk_approved():
+def test_legacy_items_cannot_be_bulk_approved_or_published_without_override():
     guide, _ = _legacy_guide()
     item = guide.visits.items[0]
     item.approved = False
     assert "Not yet checked" in verification_warnings(item)[0]
-    with pytest.raises(ValueError):
-        approve_item(item)
-    assert approve_all_unflagged(guide) == 0
-    item.approved = True  # even a forced approval flag
+    assert approve_all_unflagged(guide) == 0  # unchecked items are never bulk-approved
+    item.approved = True  # forced flag without a recorded override
     assert "decision" in decision_block_reason(guide).lower()
     assert build_published_snapshot(guide).all_items() == []
+    # Explicit Approve records the override and clears the block for that item.
+    item.approved = False
+    approve_item(item)
+    assert item.override and item.override_at
 
 
 def test_fresh_source_check_resolves_legacy_items_and_keeps_decisions():

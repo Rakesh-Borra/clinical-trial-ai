@@ -1,4 +1,5 @@
 import json
+import os
 from io import BytesIO
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -220,3 +221,167 @@ def test_plain_language_rewriter_uses_the_selected_provider():
     assert kwargs["model"] == "qwen3:4b"
     assert kwargs["options"] == {"temperature": 0}
     assert kwargs["think"] is False
+
+
+# --- LLM_PROVIDER / OPENROUTER_* configuration (all calls mocked) -------------
+
+from services import model_provider  # noqa: E402
+
+_OK = json.dumps({"choices": [{"message": {"content": '{"required_value": "x"}'}, "finish_reason": "stop"}]}).encode()
+
+
+def _fake_urlopen(captured):
+    def opener(request, timeout=None):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        body = Mock()
+        body.read.return_value = _OK
+        ctx = Mock()
+        ctx.__enter__ = Mock(return_value=body)
+        ctx.__exit__ = Mock(return_value=False)
+        return ctx
+
+    return opener
+
+
+def test_llm_provider_selects_openrouter_and_wins_over_the_legacy_name(monkeypatch):
+    monkeypatch.setenv("CTAI_MODEL_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    assert model_provider.provider_display_name() == "OpenRouter (cloud)"
+    monkeypatch.delenv("LLM_PROVIDER")
+    assert model_provider.provider_display_name() == "Ollama (local)"
+    monkeypatch.delenv("CTAI_MODEL_PROVIDER")
+    assert model_provider.provider_display_name() == "Ollama (local)"  # default
+
+
+def test_invalid_llm_provider_fails_and_does_not_fall_back(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "nope")
+    with patch("services.model_provider.ollama.Client") as client, patch(
+        "services.model_provider.urlopen"
+    ) as opener:
+        with pytest.raises(ModelProviderError, match="LLM_PROVIDER"):
+            chat_completion("p", ExampleResponse, model="qwen3:4b")
+    client.assert_not_called()
+    opener.assert_not_called()
+
+
+def test_openrouter_request_uses_env_base_url_model_and_bearer_key(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "https://example.test/api/v1/")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/model-x")
+    captured = {}
+    with patch("services.model_provider.urlopen", _fake_urlopen(captured)), patch(
+        "services.model_provider.ollama.Client"
+    ) as client:
+        text = chat_completion("prompt", ExampleResponse, model="qwen3:4b")
+    client.assert_not_called()
+    request = captured["request"]
+    assert request.full_url == "https://example.test/api/v1/chat/completions"
+    assert request.get_header("Authorization") == "Bearer sk-test-not-real"
+    payload = json.loads(request.data)
+    assert payload["model"] == "vendor/model-x"
+    assert payload["messages"] == [{"role": "user", "content": "prompt"}]
+    assert payload["response_format"]["json_schema"]["strict"] is True
+    assert payload["provider"]["allow_fallbacks"] is False
+    assert json.loads(text) == {"required_value": "x"}
+
+
+def test_default_model_and_base_url_when_only_the_key_is_set(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    captured = {}
+    with patch("services.model_provider.urlopen", _fake_urlopen(captured)):
+        chat_completion("prompt", ExampleResponse, model="qwen3:4b")
+    assert captured["request"].full_url == "https://openrouter.ai/api/v1/chat/completions"
+    assert json.loads(captured["request"].data)["model"] == model_provider.DEFAULT_OPENROUTER_MODEL
+
+
+def test_legacy_model_variable_still_works_and_new_one_wins(monkeypatch):
+    monkeypatch.setenv("CTAI_OPENROUTER_MODEL", "legacy/model")
+    assert model_provider._openrouter_model() == "legacy/model"
+    monkeypatch.setenv("OPENROUTER_MODEL", "new/model")
+    assert model_provider._openrouter_model() == "new/model"
+
+
+def test_non_https_base_url_is_rejected_before_any_request(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "http://example.test/v1")
+    with patch("services.model_provider.urlopen") as opener:
+        with pytest.raises(ModelProviderError, match="https"):
+            chat_completion("p", ExampleResponse, model="qwen3:4b")
+    opener.assert_not_called()
+
+
+def test_errors_never_contain_the_api_key(monkeypatch):
+    secret = "sk-test-SECRET-123"
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+    failures = [
+        HTTPError("https://x", 401, "bad key " + secret, {}, BytesIO(secret.encode())),
+        TimeoutError("timed out " + secret),
+    ]
+    for failure in failures:
+        with patch("services.model_provider.urlopen", side_effect=failure), patch(
+            "services.model_provider.ollama.Client"
+        ) as client:
+            with pytest.raises(ModelProviderError) as caught:
+                chat_completion("p", ExampleResponse, model="qwen3:4b")
+        assert secret not in str(caught.value)
+        client.assert_not_called()  # no silent fallback to Ollama
+
+
+def test_openrouter_failure_is_not_retried_on_ollama_via_the_agent(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    with patch("services.model_provider.urlopen", side_effect=TimeoutError()), patch(
+        "services.model_provider.ollama.Client"
+    ) as client:
+        with pytest.raises(ModelProviderError):
+            chat_completion("p", ExampleResponse, model="qwen3:4b")
+    client.assert_not_called()
+
+
+def test_dotenv_is_loaded_without_overriding_the_environment(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text("LLM_PROVIDER=openrouter\nOPENROUTER_MODEL=from/dotenv\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(model_provider, "_dotenv_loaded", False)
+    monkeypatch.setenv("OPENROUTER_MODEL", "from/real-env")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    try:
+        model_provider.load_environment()
+        assert os.environ["LLM_PROVIDER"] == "openrouter"  # taken from .env
+        assert os.environ["OPENROUTER_MODEL"] == "from/real-env"  # real env wins
+    finally:
+        os.environ.pop("LLM_PROVIDER", None)
+
+
+def test_dotenv_is_skipped_under_pytest(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text("LLM_PROVIDER=openrouter\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(model_provider, "_dotenv_loaded", False)
+    model_provider.load_environment()  # PYTEST_CURRENT_TEST is set
+    assert "LLM_PROVIDER" not in os.environ
+
+
+def test_analysis_cache_key_follows_the_active_openrouter_model(monkeypatch):
+    assert model_provider.active_model_id("qwen3:4b") == "qwen3:4b"
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/a")
+    first = model_provider.active_model_id("qwen3:4b")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/b")
+    assert first == "vendor/a" and model_provider.active_model_id("qwen3:4b") == "vendor/b"
+
+
+def test_env_is_git_ignored_and_the_example_holds_no_real_key():
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    ignored = subprocess.run(["git", "check-ignore", "-q", ".env"], cwd=root)
+    assert ignored.returncode == 0
+    example = (root / ".env.example").read_text().splitlines()
+    assert "OPENROUTER_API_KEY=" in example  # placeholder only
+    assert not any(line.startswith("OPENROUTER_API_KEY=") and line != "OPENROUTER_API_KEY=" for line in example)

@@ -230,12 +230,11 @@ def test_truncated_diagnosis_in_a_statement_is_rejected():
     assert any("cut off" in w for w in verification_warnings(item))
 
 
-def test_fallback_warning_needs_a_recorded_override_to_approve():
+def test_fallback_warning_approve_records_override():
     item, _ = _explain("Blood pressure measurement", BAD_PRESSURE)
-    with pytest.raises(ValueError):
-        approve_item(item)
-    approve_item(item, "Checked page 2 myself; the protocol wording is right.")
-    assert item.approved and item.override and item.override_reason
+    approve_item(item)
+    assert item.approved and item.override and item.override_at
+    assert item.override_reason is None  # never fabricated
     assert item.override_warnings and item.needs_review  # audit keeps the warning
 
 

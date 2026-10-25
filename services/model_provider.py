@@ -15,8 +15,10 @@ from pydantic import BaseModel
 from services import performance
 
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_URL = DEFAULT_OPENROUTER_BASE_URL + "/chat/completions"
+# Strict JSON-schema output, 1M-token context and low cost; see the README.
+DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
@@ -25,18 +27,67 @@ class ModelProviderError(RuntimeError):
     """Raised when provider configuration or a model request fails."""
 
 
+_dotenv_loaded = False
+
+
+def load_environment() -> None:
+    """
+    Load a local .env file once, without overriding real environment variables.
+
+    Skipped under pytest so a developer's .env can never change test results.
+    The key is only ever read from the environment, never printed or logged.
+    """
+    global _dotenv_loaded
+    if _dotenv_loaded or "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    _dotenv_loaded = True
+    from dotenv import load_dotenv
+
+    load_dotenv(override=False)
+
+
+def _configured_provider() -> str:
+    """LLM_PROVIDER, or the older CTAI_MODEL_PROVIDER; Ollama when neither is set."""
+    load_environment()
+    value = os.getenv("LLM_PROVIDER") or os.getenv("CTAI_MODEL_PROVIDER") or "ollama"
+    return value.strip().lower()
+
+
 def _provider_name() -> str:
-    provider = os.getenv("CTAI_MODEL_PROVIDER", "ollama").strip().lower()
+    provider = _configured_provider()
     if provider not in {"ollama", "openrouter"}:
         raise ModelProviderError(
-            "CTAI_MODEL_PROVIDER must be either 'ollama' or 'openrouter'."
+            "LLM_PROVIDER (or CTAI_MODEL_PROVIDER) must be either 'ollama' or 'openrouter'."
         )
     return provider
 
 
+def _openrouter_model() -> str:
+    load_environment()
+    return (
+        os.getenv("OPENROUTER_MODEL")
+        or os.getenv("CTAI_OPENROUTER_MODEL")
+        or DEFAULT_OPENROUTER_MODEL
+    ).strip()
+
+
+def active_model_id(ollama_model: str) -> str:
+    """The model that will answer: part of the analysis-cache key."""
+    if _configured_provider() == "openrouter":
+        return _openrouter_model()
+    return ollama_model
+
+
+def _openrouter_endpoint() -> str:
+    base = (os.getenv("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL).strip()
+    if not base.lower().startswith("https://"):
+        raise ModelProviderError("OPENROUTER_BASE_URL must start with https://.")
+    return base.rstrip("/") + "/chat/completions"
+
+
 def provider_display_name() -> str:
     """Return a safe UI label for the configured provider, without secrets."""
-    provider = os.getenv("CTAI_MODEL_PROVIDER", "ollama").strip().lower()
+    provider = _configured_provider()
     if provider == "ollama":
         return "Ollama (local)"
     if provider == "openrouter":
@@ -187,18 +238,17 @@ def _openrouter_completion(
     *,
     timeout: float,
 ) -> str:
+    load_environment()
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         raise ModelProviderError(
             "OpenRouter is selected, but OPENROUTER_API_KEY is not set."
         )
 
-    model = os.getenv(
-        "CTAI_OPENROUTER_MODEL",
-        DEFAULT_OPENROUTER_MODEL,
-    ).strip()
+    model = _openrouter_model()
     if not model:
-        raise ModelProviderError("CTAI_OPENROUTER_MODEL cannot be empty.")
+        raise ModelProviderError("OPENROUTER_MODEL cannot be empty.")
+    endpoint = _openrouter_endpoint()
 
     try:
         max_tokens = _max_output_tokens()
@@ -226,7 +276,7 @@ def _openrouter_completion(
         },
     }
     request = Request(
-        OPENROUTER_URL,
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
