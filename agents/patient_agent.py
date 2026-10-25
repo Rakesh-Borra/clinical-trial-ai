@@ -38,6 +38,10 @@ _ELIGIBILITY_DECISION_PATTERNS = (
     r"\bam i eligible\b",
     r"\bcan i (join|enroll|participate)\b",
     r"\bdo i qualify\b",
+    r"\bif i qualify\b",
+    r"\bwhether i (?:qualify|am eligible)\b",
+    r"\btell me if i (?:qualify|am eligible|can join)\b",
+    r"\bsay (?:if|whether) i (?:qualify|am eligible)\b",
     r"\bis this patient eligible\b",
     r"\bcan (they|the patient|this patient) enroll\b",
     r"\bdetermine (my )?eligibility\b",
@@ -48,6 +52,11 @@ _ELIGIBILITY_DECISION_PATTERNS = (
     r"\blet me (in|join|enroll|participate|take part)\b",
     r"\bcan i (be in|take part|sign up)\b",
     r"\bam i (allowed|able) to (join|enroll|participate|take part)\b",
+    # Soft personal eligibility asks (still refused — no personal decision).
+    r"\bam i (healthy|sick|old|young) enough\b",
+    r"\bbased on my .{0,40}\bam i (in|eligible|qualified)\b",
+    r"\bwould you recommend (?:i |that i )?(?:join|enroll|participate)\b",
+    r"\bshould i (join|enroll|participate|sign up)\b",
 )
 
 _MEDICAL_ADVICE_PATTERNS = (
@@ -67,6 +76,16 @@ _MEDICAL_ADVICE_PATTERNS = (
     r"\b(skip|miss|avoid|refuse|decline|delay|postpone|stop|change|cancel)\b"
     r".{0,25}\b(blood|test|tests|testing|procedure|procedures|visit|visits|scan|exam|sample)\b",
     r"\b(do i have to|must i|am i required to|can i opt out of)\b.{0,25}\b(blood|test|procedure|scan|sample)",
+    # Soft personal health decisions still need clinician oversight.
+    r"\bis (?:missing|skipping) .{0,40}\b(?:bad|harmful|dangerous|risky) (?:for me|to me)?\b",
+    r"\bwould you recommend .{0,40}\b(?:medication|dose|treatment|insulin)\b",
+    # Guarantees / assurances of safety or outcomes are out of scope.
+    r"\bguarante(?:e|ed|ees|eing)\b.{0,50}\b(?:safe|safety|outcome|success|risk)\b",
+    r"\b(?:safe|safety|outcome|risk)\b.{0,50}\bguarante(?:e|ed|ees|eing)\b",
+    r"\b(?:can|could) you (?:guarantee|promise|assure)\b",
+    r"\bpromise .{0,30}\b(?:safe|safety|outcome)\b",
+    r"\bis (?:this|the) (?:study|trial) (?:100% |completely |totally )?safe\b",
+    r"\bwill (?:this|the) (?:study|trial|treatment) (?:definitely )?work\b",
 )
 
 _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -75,6 +94,13 @@ _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "about the study",
         "study about",
         "tell me about the trial",
+        "tell me about the study",
+        "what happens in the study",
+        "what happen in the study",
+        "what happens during the study",
+        "what happen during the study",
+        "what happens during the trial",
+        "what will happen during the study",
         "protocol title",
         "study name",
         "trial name",
@@ -106,15 +132,24 @@ _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "how long",
         "follow-up",
         "screening visit",
+        "when does the study end",
+        "study end",
+        "study timeline",
+        "last visit",
+        "final visit",
+        "how long do the study visits take",
     ),
     "procedures": (
         "procedure",
         "procedures",
         "what will happen",
         "testing",
+        "testings",
         "tests",
         "blood glucose",
         "blood pressure",
+        "what tests",
+        "kind of tests",
     ),
     "safety": (
         "safety",
@@ -137,7 +172,12 @@ def _matches_any(query: str, patterns: tuple[str, ...]) -> bool:
 
 
 def classify_patient_intent(query: str) -> str:
-    """Classify patient intent with deterministic keyword rules."""
+    """Classify patient intent with deterministic keyword rules.
+
+    Medical advice, safety guarantees, and personal eligibility decisions
+    always win over ordinary section keywords (including prompt-injection
+    phrasing that mentions "safety rules").
+    """
     if _matches_any(query, _MEDICAL_ADVICE_PATTERNS):
         return "medical_advice_refused"
     if _matches_any(query, _ELIGIBILITY_DECISION_PATTERNS):

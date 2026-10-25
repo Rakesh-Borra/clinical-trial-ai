@@ -71,8 +71,7 @@ def _build_v2(at, study_id, label="2.0", change=True):
         at = _click(at, "continue_review_btn")
         at = _generated(at)
     at = _click(at, "guide_approve_all_btn")
-    for button in [b for b in at.button if b.key and b.key.endswith("_approve")]:
-        at = _click(at, button.key)
+    at = _click(at, "guide_approve_all_confirm_btn")
     make_publishable(protocol_id)
     return at.run(), protocol_id
 

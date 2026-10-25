@@ -793,6 +793,41 @@ def _same_study_ids() -> set[str]:
     return ids
 
 
+def _other_active_published_uses_name(protocol_id: str, protocol_name: str) -> bool:
+    """
+    True when a different study already has an active published name match.
+
+    Uses the publications table as authority (not a stale session cache).
+    The current protocol and other versions of the same study never conflict
+    with themselves.
+    """
+    name_key = protocol_name.casefold()
+    same_study = _same_study_ids()
+    try:
+        stored = review_store.load_publications()
+    except (sqlite3.Error, OSError):
+        stored = {}
+    for other_id, record in stored.items():
+        if record.get("status") != review_store.PUBLISHED:
+            continue
+        if other_id == protocol_id or other_id in same_study:
+            continue
+        if str(record.get("name", "")).casefold() == name_key:
+            return True
+    # Also reject a stale session entry for a deleted id that somehow remains.
+    published = st.session_state.get("published_protocols", {})
+    for other_id, record in published.items():
+        if other_id == protocol_id or other_id in same_study:
+            continue
+        if not isinstance(record, Mapping):
+            continue
+        if str(record.get("name", "")).casefold() == name_key:
+            # Only count session hits that still exist as published in the DB.
+            if other_id in stored and stored[other_id].get("status") == review_store.PUBLISHED:
+                return True
+    return False
+
+
 def publish_block_reason(
     guide: Any,
     pipeline_result: Optional[Mapping[str, Any]],
@@ -1005,19 +1040,15 @@ def publish_current_protocol() -> tuple[bool, str]:
     if reason:
         return False, reason
 
-    published = dict(st.session_state.get("published_protocols", {}))
-    same_study = _same_study_ids()
-    if any(
-        other_id != protocol_id
-        and other_id not in same_study
-        and isinstance(record, Mapping)
-        and str(record.get("name", "")).casefold() == protocol_name.casefold()
-        for other_id, record in published.items()
-    ):
+    # Session cache can lag after deletion; sync then trust the DB for names.
+    sync_published_from_store()
+    if _other_active_published_uses_name(protocol_id, protocol_name):
         return False, (
             "Another published protocol already uses this name. Choose a "
             "different protocol name in Step 1B."
         )
+    published = dict(st.session_state.get("published_protocols", {}))
+    same_study = _same_study_ids()
     snapshot = _publishable(guide)
     snapshot.trial_title = protocol_name
     snapshot.protocol_id = None
@@ -1044,6 +1075,7 @@ def publish_current_protocol() -> tuple[bool, str]:
         "guide": snapshot,
         "version_label": version.get("version_label"),
         "published_at": version.get("published_at"),
+        "study_id": version.get("study_id"),
     }
     st.session_state["published_protocols"] = published
     persist_review()
@@ -1080,9 +1112,11 @@ def sync_published_from_store() -> None:
     """
     Make the stored publication state the truth for patients.
 
-    Published rows replace the session copy, withdrawn rows remove it, and
-    protocols the database does not know about are left alone. This is what
-    lets a restart (or another browser session) see the latest decisions.
+    Only the current published version of each study is patient-visible.
+    Withdrawn, superseded, and non-current published rows are removed from the
+    session. Protocols only present in the session (and unknown to the database)
+    are left alone here — deletion clears those caches explicitly via
+    ``protocol_deletion.clear_session_after_delete``.
     """
     try:
         stored = review_store.load_publications()
@@ -1090,8 +1124,13 @@ def sync_published_from_store() -> None:
         return
     published = dict(st.session_state.get("published_protocols", {}))
     changed = False
+    active_ids = {
+        protocol_id
+        for protocol_id, record in stored.items()
+        if review_store.is_patient_visible_publication(record)
+    }
     for protocol_id, record in stored.items():
-        if record["status"] == review_store.PUBLISHED:
+        if review_store.is_patient_visible_publication(record):
             current = published.get(protocol_id)
             if current is None or (
                 isinstance(current, Mapping)
@@ -1108,12 +1147,17 @@ def sync_published_from_store() -> None:
                     "guide": record["guide"],
                     "version_label": record["version_label"],
                     "published_at": record["published_at"],
+                    "study_id": record.get("study_id"),
                 }
                 changed = True
         elif published.pop(protocol_id, None) is not None:
             changed = True
     if changed:
         st.session_state["published_protocols"] = published
+    active = st.session_state.get("patient_active_protocol_id")
+    if active and active not in active_ids and active in stored:
+        st.session_state["patient_active_protocol_id"] = None
+        st.session_state.pop("patient_protocol_select", None)
 
 
 def _remember_saved_names() -> None:

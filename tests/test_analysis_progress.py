@@ -18,10 +18,11 @@ def test_report_stage_is_noop_outside_a_job():
 
 
 def test_stage_state_uses_completed_units_within_milestones():
+    # extract is 0–18%; analyze is 18–72% (see analysis_progress.STAGES).
     state = stage_state("extract", 5, 10)
     assert state.determinate and (state.completed, state.total) == (5, 10)
-    assert state.percent == pytest.approx(10.0)
-    assert stage_state("analyze", 1, 4).percent == pytest.approx(35.0)
+    assert state.percent == pytest.approx(9.0)
+    assert stage_state("analyze", 1, 4).percent == pytest.approx(31.5)
 
 
 def test_unmeasurable_stage_is_indeterminate_and_not_advanced():
@@ -52,7 +53,8 @@ def test_job_progress_is_monotonic_capped_and_completes_at_100(manager):
     assert reported.wait(5)
     seen["during"] = manager.get(job_id).progress
     during = seen["during"]
-    assert during.percent == pytest.approx(50.0)
+    # analyze 2/4 → 45%; a later extract report must not move progress backwards.
+    assert during.percent == pytest.approx(45.0)
     assert manager.get(job_id).status == analysis_jobs.RUNNING
     release.set()
     assert manager.wait(job_id)
@@ -71,7 +73,7 @@ def test_failed_job_never_reports_100_and_keeps_stage(manager):
     assert manager.wait(job_id)
     job = manager.get(job_id)
     assert job.status == analysis_jobs.FAILED
-    assert job.progress.percent == pytest.approx(35.0)
+    assert job.progress.percent == pytest.approx(31.5)
     assert job.progress.stage == analysis_progress.STAGES["analyze"][0]
 
 
@@ -105,4 +107,5 @@ def test_extract_pdf_reports_page_progress(tmp_path):
         extract_pdf(str(pdf))
     assert [s.completed for s in states] == [0, 1, 2, 3]
     assert all(s.total == 3 for s in states)
-    assert states[-1].percent == pytest.approx(20.0)
+    # extract milestone ends at 18% when all pages are done.
+    assert states[-1].percent == pytest.approx(18.0)

@@ -359,7 +359,8 @@ def test_editing_an_approved_summary_requires_review_and_approval_again():
 def _guide_with_stale_override_confirmation():
     from agents.plain_language_agent import approve_item
 
-    guide = _approved_guide()
+    # Must match the eight-statement pipeline used by _app() / _result().
+    guide = _approved_guide(_result())
     item = guide.all_items()[0]
     item.source_status = "unverified"
     approve_item(item, "checked the protocol page")
@@ -381,10 +382,8 @@ def test_stale_override_confirmation_does_not_block_a_fully_approved_guide():
 
 
 def test_publish_is_enabled_with_stale_override_confirmation_and_acknowledged_gaps():
-    at = _app()
     guide, _ = _guide_with_stale_override_confirmation()
-    at.session_state["patient_guide"] = guide
-    at = at.run()
+    at = _app(guide=guide)
     assert not at.button(key="publish_protocol_btn").disabled
     assert not any("final approval validation" in e.value for e in list(at.error) + list(at.warning))
 
@@ -439,7 +438,7 @@ def test_final_validation_accepts_rehydrated_guide_from_dump_or_foreign_class():
     from services.guide_review import build_published_snapshot
     from ui.patient_guide_tab import final_validation_reason
 
-    guide = _approved_guide()
+    guide = _approved_guide(_result())
     assert final_validation_reason(guide.model_dump()) is None
     assert final_validation_reason(guide.model_dump_json()) == "The patient guide could not be read."
 
@@ -450,7 +449,7 @@ def test_final_validation_accepts_rehydrated_guide_from_dump_or_foreign_class():
     assert final_validation_reason(snapshot) is None
     assert len(snapshot.all_items()) == len(guide.all_items())
 
-    at = _app()
+    at = _app(guide=guide)
     at.session_state["patient_guide"] = guide.model_dump()
     at = at.run()
     assert isinstance(at.session_state["patient_guide"], PatientGuide)

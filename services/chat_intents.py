@@ -172,9 +172,47 @@ def correct_query_spelling(query: str, extra_vocab: Iterable[str] = ()) -> str:
 
 
 
+# Arrival / check-in statements are not factual protocol questions.
+# After _normalize(), "I'm" becomes "i m".
+_ARRIVAL_STATEMENT = re.compile(
+    r"^(?:i m |i am |im |i )?(?:just )?(?:came|coming|here|arrived|got here)"
+    r"(?: (?:in|over))?(?: for| to)?"
+    r"(?: (?:a|the|my|our))?"
+    r" (?:test|tests|testing|study|trial|visit|appointment)s?"
+    r"(?: today| now)?"
+    r"$",
+    re.IGNORECASE,
+)
+
+
+def situational_reply_text(query: str) -> Optional[str]:
+    """
+    Friendly clarification for arrival-style statements.
+
+    Does not invent appointment reasons or clinical facts — only offers to
+    explain approved study information if that is what the patient meant.
+    """
+    if not query or len(query) > 80:
+        return None
+    text = _normalize(query)
+    if not text or not _ARRIVAL_STATEMENT.fullmatch(text):
+        return None
+    if re.search(r"\btests?\b|\btesting\b", text):
+        return (
+            "Welcome! Are you asking about the tests involved in this "
+            "clinical trial? I can explain the tests described in the "
+            "approved study information."
+        )
+    return (
+        "Welcome! Are you asking about what happens in this clinical trial? "
+        "I can share the visits, tests, and safety details from the approved "
+        "study information."
+    )
+
+
 def social_answer(query: str) -> Optional[PatientAnswer]:
-    """Wrap a social reply as a PatientAnswer, or None for anything else."""
-    reply = social_reply_text(query)
+    """Wrap a social or situational reply as a PatientAnswer, or None."""
+    reply = social_reply_text(query) or situational_reply_text(query)
     if reply is None:
         return None
     return PatientAnswer(
@@ -185,11 +223,50 @@ def social_answer(query: str) -> Optional[PatientAnswer]:
     )
 
 
+def display_unavailable_message(message: Optional[str]) -> str:
+    """Patient-facing wording for empty sections (display only; data unchanged)."""
+    text = (message or "").strip()
+    if not text:
+        return "Not specified in the provided protocol."
+    if "did not include this information" in text.casefold():
+        return "Not specified in the provided protocol."
+    return text
+
+
 _PHRASING = (
     (r"\bappointments?\b", lambda m: "visits" if m.group(0).endswith("s") else "visit"),
     (r"\bcome in\b|\bcome to the clinic\b|\bgo to the clinic\b", lambda m: "visit"),
     (r"\bquit\b|\bdrop out\b|\bopt out\b|\bleave the (?:study|trial)\b",
      lambda m: "withdraw from the study"),
+    # Informal / misspelled patient language → guide vocabulary.
+    (r"\btestings\b", lambda m: "tests"),
+    (r"\btesting\b", lambda m: "tests"),
+    (r"\bwhat kind of tests?\b", lambda m: "what tests"),
+    (r"\bwhat types? of tests?\b", lambda m: "what tests"),
+    (r"\bwhat kind of (?:tests|testing|procedures)\b", lambda m: "what tests"),
+    (r"\bwhat happens? during (?:the |this )?(?:study|trial)\b",
+     lambda m: "what happens in the study"),
+    (r"\bwhat will happen during (?:the |this )?(?:study|trial)\b",
+     lambda m: "what happens in the study"),
+    (r"\bwhat happens? in (?:the |this )?(?:study|trial)\b",
+     lambda m: "what happens in the study"),
+    # Only rewrite when the patient already named the study/trial — bare
+    # "when does this end?" stays context-sensitive for follow-up resolution.
+    (r"\bwhen (?:is|does) (?:the )?(?:study|trial) (?:end|over|finish|done)\b",
+     lambda m: "when does the study end"),
+    (r"\bhow long (?:is|will) (?:the |this )?(?:study|trial)(?: last| take)?\b",
+     lambda m: "how long do the study visits take"),
+    (r"\bhow long does the study last\b",
+     lambda m: "how long do the study visits take"),
+    (r"\bwhat happens next\b", lambda m: "what visits and tests happen next"),
+    # Stable form so spelling correction cannot turn "happens"→"happen".
+    (r"\bwhat happens? after (?:that|this|it)\b",
+     lambda m: "what happens after that in the visits"),
+    (r"\bany days\b", lambda m: "how long will testing continue"),
+    (r"\bhow many days does the tests? prolong\b",
+     lambda m: "how long will testing continue"),
+    (r"\bhow long will testing continue\b",
+     lambda m: "how long will testing continue"),
 )
 
 

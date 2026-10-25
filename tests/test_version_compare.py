@@ -156,3 +156,142 @@ def test_comparison_is_per_version_and_keeps_history(two_versions):
     vc.compare_versions("v2", page_text_loader=_loader())
     assert version_store.load_comparison("v1") is None
     assert review_store.load_draft("v1")["guide"].visits.items[0].original_text.endswith("±3 days.")
+
+
+def _amendment_pair(v1_content, v2_content, v2_pages):
+    """Save two versions; V2 PDF text is supplied explicitly (may omit Timing:)."""
+    study = _save("v1", v1_content)
+    _save("v2", v2_content, study_id=study, label="2.0")
+    texts = {"v1": _page_texts(v1_content), "v2": v2_pages}
+    return lambda pid: texts[pid]
+
+
+def test_day60_followup_with_timing_label_and_paraphrase_passes():
+    """Extractor inserts 'Timing:'; PDF says follow-up; plain says check-up."""
+    v1 = {
+        "visits": [
+            ("A screening visit on Day 0.", 2, "Screening Visit. Timing: Day 0"),
+        ],
+    }
+    v2 = {
+        "visits": [
+            ("A screening visit on Day 0.", 2, "Screening Visit. Timing: Day 0"),
+            (
+                "There will be an extra check-up visit on Day 60.",
+                2,
+                "Additional Follow-up Visit. Timing: Day 60",
+            ),
+        ],
+    }
+    v2_pages = {
+        2: (
+            "screening visit: day 0. "
+            "additional follow-up visit: day 60. (new in version 2.0)"
+        ),
+    }
+    diff = vc.compare_versions("v2", page_text_loader=_amendment_pair(v1, v2, v2_pages))
+    added = next(c for c in diff["changes"] if c["change"] == "added")
+    assert "Day 60" in added["new"]["plain_text"]
+    assert added["evidence"] == "verified"
+    assert diff["source_backed"] is True
+
+
+def test_incorrect_day90_followup_fails():
+    v1 = {"visits": [("A screening visit on Day 0.", 2, "Screening Visit. Timing: Day 0")]}
+    v2 = {
+        "visits": [
+            ("A screening visit on Day 0.", 2, "Screening Visit. Timing: Day 0"),
+            (
+                "There will be an extra check-up visit on Day 90.",
+                2,
+                "Additional Follow-up Visit. Timing: Day 90",
+            ),
+        ],
+    }
+    v2_pages = {2: "screening visit: day 0. additional follow-up visit: day 60."}
+    diff = vc.compare_versions("v2", page_text_loader=_amendment_pair(v1, v2, v2_pages))
+    added = next(c for c in diff["changes"] if c["change"] == "added")
+    assert added["evidence"] == "unverified"
+
+
+def test_invented_blood_test_fails():
+    v1 = {"procedures": [("Blood is drawn at each visit.", 5, "Blood collection occurs.")]}
+    v2 = {
+        "procedures": [
+            ("Blood is drawn at each visit.", 5, "Blood collection occurs."),
+            (
+                "A new genetic screening blood test is required.",
+                5,
+                "Genetic Screening Assay: mandatory DNA panel.",
+            ),
+        ],
+    }
+    v2_pages = {5: "blood collection occurs at each visit. hba1c is measured."}
+    diff = vc.compare_versions("v2", page_text_loader=_amendment_pair(v1, v2, v2_pages))
+    added = next(c for c in diff["changes"] if c["change"] == "added")
+    assert added["evidence"] == "unverified"
+
+
+def test_incorrect_cited_page_for_followup_fails():
+    v1 = {"visits": [("A screening visit on Day 0.", 2, "Screening Visit. Timing: Day 0")]}
+    v2 = {
+        "visits": [
+            ("A screening visit on Day 0.", 2, "Screening Visit. Timing: Day 0"),
+            (
+                "There will be an extra check-up visit on Day 60.",
+                3,  # wrong page — Day 60 is only on page 2
+                "Additional Follow-up Visit. Timing: Day 60",
+            ),
+        ],
+    }
+    v2_pages = {
+        2: "screening visit: day 0. additional follow-up visit: day 60.",
+        3: "eligibility age 18 to 70 years. no visit schedule on this page.",
+    }
+    diff = vc.compare_versions("v2", page_text_loader=_amendment_pair(v1, v2, v2_pages))
+    added = next(c for c in diff["changes"] if c["change"] == "added")
+    assert added["evidence"] == "unverified"
+
+
+def test_age_changed_18_65_to_18_70_passes():
+    v1 = {
+        "inclusion": [
+            ("You must be 18 to 65 years old.", 1, "Age 18–65 years inclusive."),
+        ],
+    }
+    v2 = {
+        "inclusion": [
+            ("You must be 18 to 70 years old.", 1, "Age 18–70 years inclusive."),
+        ],
+    }
+    v2_pages = {1: "inclusion criteria. age 18–70 years inclusive."}
+    # V1 page must support the old excerpt for the modified side.
+    texts = {
+        "v1": {1: "inclusion criteria. age 18–65 years inclusive."},
+        "v2": v2_pages,
+    }
+    study = _save("v1", v1)
+    _save("v2", v2, study_id=study, label="2.0")
+    diff = vc.compare_versions("v2", page_text_loader=lambda pid: texts[pid])
+    modified = next(c for c in diff["changes"] if c["change"] == "modified")
+    assert "70" in modified["new"]["original_text"]
+    assert modified["evidence"] == "verified"
+
+
+def test_hba1c_addition_passes():
+    v1 = {"procedures": [("Blood is drawn at each visit.", 5, "Blood collection occurs.")]}
+    v2 = {
+        "procedures": [
+            ("Blood is drawn at each visit.", 5, "Blood collection occurs."),
+            (
+                "An HbA1c blood test is added.",
+                5,
+                "HbA1c blood test at screening.",
+            ),
+        ],
+    }
+    v2_pages = {5: "blood collection occurs. hba1c blood test at screening."}
+    diff = vc.compare_versions("v2", page_text_loader=_amendment_pair(v1, v2, v2_pages))
+    added = next(c for c in diff["changes"] if c["change"] == "added")
+    assert "HbA1c" in added["new"]["plain_text"] or "hba1c" in added["new"]["original_text"].casefold()
+    assert added["evidence"] == "verified"

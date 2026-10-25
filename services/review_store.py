@@ -553,14 +553,15 @@ def publication_status(protocol_id: str) -> Optional[str]:
 
 def load_publications() -> Dict[str, Dict[str, Any]]:
     """
-    protocol_id -> {"name", "guide", "status"} for every stored publication.
+    protocol_id -> {"name", "guide", "status", ...} for every stored publication.
 
     Rows whose snapshot cannot be read are omitted, so they can never reach
-    patients.
+    patients. Includes study/version fields when the protocol is registered.
     """
     with closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT p.*, v.version_label, v.published_at AS version_published_at "
+            "SELECT p.*, v.version_label, v.published_at AS version_published_at, "
+            "v.study_id, v.is_current "
             "FROM publications p LEFT JOIN protocol_versions v USING (protocol_id)"
         ).fetchall()
     result: Dict[str, Dict[str, Any]] = {}
@@ -569,14 +570,41 @@ def load_publications() -> Dict[str, Dict[str, Any]]:
             guide = PatientGuide.model_validate_json(row["guide_json"])
         except ValueError:
             continue
+        is_current = row["is_current"]
         result[row["protocol_id"]] = {
             "name": row["name"],
             "guide": guide,
             "status": row["status"],
             "version_label": row["version_label"],
             "published_at": row["published_at"] or row["version_published_at"],
+            "study_id": row["study_id"],
+            "is_current": None if is_current is None else bool(is_current),
         }
     return result
+
+
+def is_patient_visible_publication(record: Dict[str, Any]) -> bool:
+    """
+    True when patients may see this publication snapshot.
+
+    Requires status ``published``. When the protocol belongs to a study, it must
+    also be that study's one current version — superseded siblings stay in the
+    database for coordinators but never appear in the Patient Portal.
+    """
+    if record.get("status") != PUBLISHED:
+        return False
+    if record.get("study_id") is not None and record.get("is_current") is not None:
+        return bool(record["is_current"])
+    return True
+
+
+def patient_visible_publications() -> Dict[str, Dict[str, Any]]:
+    """Active published snapshots only (one current version per study)."""
+    return {
+        protocol_id: record
+        for protocol_id, record in load_publications().items()
+        if is_patient_visible_publication(record)
+    }
 
 
 # ---------------------------------------------------------------------------
