@@ -7,7 +7,7 @@ from services.analysis_progress import report_stage
 from services import analysis_cache
 from services.patient_relevance import filter_protocol_blocks
 from services.completeness_audit import audit_completeness
-from services.section_chunker import build_chunks
+from services.section_chunker import build_chunks, uncovered_source_blocks
 from services.protocol_chunker import chunk_protocol
 from services.pdf_processor import extract_pdf
 from services.source_verifier import verify_source_pages
@@ -20,17 +20,27 @@ from agents.protocol_analysis_agent import (
 LONG_PROTOCOL_THRESHOLD_CHARS = int(
     os.getenv("CTAI_LONG_PROTOCOL_THRESHOLD_CHARS", "12000")
 )
-PROTOCOL_CHUNK_CHARS = int(os.getenv("CTAI_PROTOCOL_CHUNK_CHARS", "8000"))
+# Target ~4,000–6,000 characters per LLM batch (token estimate ≈ chars / 3.2).
+PROTOCOL_CHUNK_CHARS = int(os.getenv("CTAI_PROTOCOL_CHUNK_CHARS", "5000"))
+# Overall resource ceiling for patient-relevant text across all batches—not a
+# per-call limit. Large 123–180 page protocols (~0.4–0.7M chars) fit by default.
 PROTOCOL_MAX_INPUT_CHARS = int(
-    os.getenv("CTAI_PROTOCOL_MAX_INPUT_CHARS", "320000")
+    os.getenv("CTAI_PROTOCOL_MAX_INPUT_CHARS", "2000000")
 )
-PROTOCOL_MAX_CALLS = int(os.getenv("CTAI_PROTOCOL_MAX_CALLS", "65"))
-# Token budget per chunk (estimated); the default matches ~8000 characters.
-PROTOCOL_CHUNK_TOKENS = int(os.getenv("CTAI_PROTOCOL_CHUNK_TOKENS", "2500"))
+# Worst case ≈ 2 passes × chunks + 1 rescue; ~180 pages need well above 65.
+PROTOCOL_MAX_CALLS = int(os.getenv("CTAI_PROTOCOL_MAX_CALLS", "450"))
+# Token budget per chunk (estimated); the default matches ~5,000 characters.
+PROTOCOL_CHUNK_TOKENS = int(os.getenv("CTAI_PROTOCOL_CHUNK_TOKENS", "1560"))
+# Limited overlap only when an oversized section is character-split.
+PROTOCOL_CHUNK_OVERLAP_CHARS = int(
+    os.getenv("CTAI_PROTOCOL_CHUNK_OVERLAP_CHARS", "400")
+)
 ANALYSIS_MAX_SECONDS = float(os.getenv("CTAI_ANALYSIS_MAX_SECONDS", "1800"))
 PROTOCOL_RESCUE_MAX_CHARS = int(
     os.getenv("CTAI_PROTOCOL_RESCUE_MAX_CHARS", "8000")
 )
+# Bounded retries for a failed extraction pass within a batch.
+PROTOCOL_PASS_RETRIES = int(os.getenv("CTAI_PROTOCOL_PASS_RETRIES", "1"))
 
 
 def _analysis_settings() -> dict:
@@ -45,6 +55,8 @@ def _analysis_settings() -> dict:
         "num_predict": agent.NUM_PREDICT,
         "num_ctx": agent.NUM_CTX,
         "chunk_tokens": PROTOCOL_CHUNK_TOKENS,
+        "chunk_overlap_chars": PROTOCOL_CHUNK_OVERLAP_CHARS,
+        "pass_retries": PROTOCOL_PASS_RETRIES,
         "route": True,
     }
 
@@ -149,8 +161,13 @@ def _analyze_protocol_pdf(file_path: str, tracker: performance.PerfTracker):
     # Only the text sent to the model changes; the PDF result is untouched.
     with tracker.stage("relevance_filter"):
         block_result = filter_protocol_blocks(pdf_result["pages"])
-        chunks = build_chunks(block_result.blocks, PROTOCOL_CHUNK_TOKENS)
+        chunks = build_chunks(
+            block_result.blocks,
+            PROTOCOL_CHUNK_TOKENS,
+            overlap_chars=PROTOCOL_CHUNK_OVERLAP_CHARS,
+        )
         relevance = _relevance_summary(pdf_result["pages"], block_result)
+    coverage_gaps = uncovered_source_blocks(block_result.blocks, chunks)
     chunk_text = "\n\n".join(chunk.text for chunk in chunks)
     chunk_counts = {
         "chunks_without_filter": len(
@@ -169,7 +186,8 @@ def _analyze_protocol_pdf(file_path: str, tracker: performance.PerfTracker):
     if is_long_protocol:
         cache_key = analysis_cache.make_key(chunk_text, _analysis_settings())
         cached = analysis_cache.load(cache_key)
-        if cached is not None:
+        reused_full_analysis = cached is not None
+        if reused_full_analysis:
             analysis = cached["analysis"]
             long_warnings = list(cached["warnings"]) + [
                 "Model analysis was reused from the cache (same document "
@@ -192,9 +210,20 @@ def _analyze_protocol_pdf(file_path: str, tracker: performance.PerfTracker):
                 chunks=chunks,
                 route=True,
                 max_seconds=ANALYSIS_MAX_SECONDS,
+                pass_retries=PROTOCOL_PASS_RETRIES,
+                use_pass_cache=True,
             )
-            if not failed_chunks and not incomplete_reasons:
-                analysis_cache.store(cache_key, analysis, long_warnings)
+        if coverage_gaps:
+            long_warnings.extend(coverage_gaps)
+            incomplete_reasons.extend(
+                gap for gap in coverage_gaps if gap not in incomplete_reasons
+            )
+        if (
+            not reused_full_analysis
+            and not failed_chunks
+            and not incomplete_reasons
+        ):
+            analysis_cache.store(cache_key, analysis, long_warnings)
         unreadable_pages = [
             page["page_number"]
             for page in pdf_result["pages"]

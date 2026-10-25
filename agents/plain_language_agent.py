@@ -23,7 +23,10 @@ gives medical advice. All output still requires coordinator approval.
 
 import hashlib
 import json
+import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
@@ -46,6 +49,9 @@ from services.source_verifier import (
 
 MODEL_NAME = "qwen3:4b"
 MAX_ATTEMPTS = 2
+# Concurrent statement rewrites (OpenRouter/Ollama). Override with CTAI_GUIDE_WORKERS.
+DEFAULT_GUIDE_WORKERS = 4
+_RATE_LIMIT_RETRIES = 3
 
 DISCLAIMER = (
     "This summary is for general information only. It is not medical "
@@ -310,17 +316,42 @@ Your previous answer had these problems. Fix them:
     return prompt
 
 
+def guide_worker_count() -> int:
+    """Bounded parallelism for statement rewrites (default 4)."""
+    raw = os.getenv("CTAI_GUIDE_WORKERS", str(DEFAULT_GUIDE_WORKERS))
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_GUIDE_WORKERS
+    return max(1, min(value, 16))
+
+
 def ollama_rewriter(original: str, section: str, feedback: Optional[str] = None) -> str:
     """Rewrite one protocol statement with the configured model provider."""
-    content = chat_completion(
-        build_prompt(original, section, feedback),
-        PlainLanguageRewrite,
-        model=MODEL_NAME,
-        options={"temperature": 0},
-        think=False,
-    )
-    data = json.loads(content)
-    return PlainLanguageRewrite.model_validate(data).plain_text
+    prompt = build_prompt(original, section, feedback)
+    last_error: Optional[BaseException] = None
+    for attempt in range(_RATE_LIMIT_RETRIES):
+        try:
+            content = chat_completion(
+                prompt,
+                PlainLanguageRewrite,
+                model=MODEL_NAME,
+                options={"temperature": 0},
+                think=False,
+            )
+            data = json.loads(content)
+            return PlainLanguageRewrite.model_validate(data).plain_text
+        except ModelProviderError as exc:
+            last_error = exc
+            message = str(exc).casefold()
+            # OpenRouter rate limits / transient HTTP failures: bounded backoff.
+            if attempt + 1 >= _RATE_LIMIT_RETRIES:
+                break
+            if not any(token in message for token in ("429", "rate", "timeout", "503", "502")):
+                raise
+            time.sleep(min(2 ** attempt, 8))
+    assert last_error is not None
+    raise last_error
 
 
 # ---------------------------------------------------------------------------
@@ -743,6 +774,8 @@ def generate_patient_guide(
     verification: Optional[List[dict]] = None,
     reuse: Optional[Dict[str, GuideItem]] = None,
     source_pages: Optional[Dict[str, str]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    max_workers: Optional[int] = None,
 ) -> PatientGuide:
     """
     Build a patient-friendly guide from a structured protocol analysis.
@@ -755,19 +788,98 @@ def generate_patient_guide(
     instead of being rewritten again.
     `source_pages` (page number -> protocol page text) grounds each rewrite in
     the cited passage.
+    `cancel_check` is polled between scheduling work; in-flight rewrites still
+    finish and may be saved. Partial runs leave ``generation_complete`` False.
     Every item starts unapproved: a coordinator must approve it before
     patients can see it.
     """
     index = verification_index(verification)
     specs = statement_specs(analysis)
-    guide = new_guide_shell(analysis, len(specs), True)
-    reuse = reuse or {}
+    reuse = dict(reuse or {})
+    by_id: Dict[str, GuideItem] = {}
+    cancelled = False
+
+    # Reused items first (no API cost); preserve coordinator decisions.
+    # Do not invoke on_item for reuse — progress comes from SQLite, and
+    # re-saving would risk clobbering coordinator edits.
     for spec in specs:
-        item = reuse.get(spec.item_id) or generate_item(spec, rewriter, index, source_pages)
-        getattr(guide, spec.attr).items.append(item)
-        if on_item:
-            on_item(item)
-    return finalize_guide(guide)
+        existing = reuse.get(spec.item_id)
+        if existing is None:
+            continue
+        by_id[spec.item_id] = existing
+
+    pending = [spec for spec in specs if spec.item_id not in by_id]
+    workers = max(1, max_workers if max_workers is not None else guide_worker_count())
+
+    def _should_cancel() -> bool:
+        return bool(cancel_check and cancel_check())
+
+    if pending and not _should_cancel():
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures: Dict[Future, StatementSpec] = {}
+            for spec in pending:
+                if _should_cancel():
+                    cancelled = True
+                    break
+                futures[pool.submit(
+                    generate_item, spec, rewriter, index, source_pages,
+                )] = spec
+            for future in as_completed(futures):
+                spec = futures[future]
+                try:
+                    item = future.result()
+                except Exception as exc:  # noqa: BLE001 — surface as failed item
+                    item = GuideItem(
+                        section=spec.section,
+                        original_text=spec.text,
+                        plain_text=spec.text,
+                        source_page=spec.page,
+                        item_id=spec.item_id,
+                        generation_failed=True,
+                        needs_review=True,
+                        review_reasons=[
+                            f"The language model could not produce a rewrite "
+                            f"({type(exc).__name__})."
+                        ],
+                        generated_by="fallback",
+                    )
+                    if index is not None:
+                        apply_source_status(
+                            item,
+                            index.get((spec.category, normalize_text(spec.key or ""))),
+                        )
+                # Never overwrite a reused / coordinator-owned statement.
+                if spec.item_id in reuse:
+                    continue
+                by_id[spec.item_id] = item
+                if on_item:
+                    on_item(item)
+                if _should_cancel():
+                    cancelled = True
+            if cancelled:
+                for future in futures:
+                    future.cancel()
+
+    if _should_cancel():
+        cancelled = True
+
+    guide = new_guide_shell(analysis, len(specs), not cancelled and len(by_id) == len(specs))
+    for spec in specs:
+        item = by_id.get(spec.item_id)
+        if item is not None:
+            getattr(guide, spec.attr).items.append(item)
+    guide.generation_complete = (
+        not cancelled
+        and len(specs) > 0
+        and all(spec.item_id in by_id for spec in specs)
+        and not any(
+            by_id[spec.item_id].generation_failed and not by_id[spec.item_id].rejected
+            for spec in specs
+        )
+    )
+    if guide.generation_complete:
+        return finalize_guide(guide)
+    return guide
 
 
 def ensure_item_ids(guide: PatientGuide) -> bool:

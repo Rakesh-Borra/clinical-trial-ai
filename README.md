@@ -81,7 +81,7 @@ Everything else (`services/`, `models/`, `ui/`) are helper modules that support 
 - SQLite cache of completed analyses (`services/analysis_cache.py`), keyed on document text and processing settings
 - Completeness audit (`services/completeness_audit.py`) flagging missing or uncertain patient-relevant categories
 - Performance instrumentation (`services/performance.py`): stage timings, chunk and model-call counts, token counts when the provider reports them
-- Input and model-call limits (320,000 characters, 65 calls, 1,800 s analysis budget by default) with actionable error messages
+- Input and model-call limits (2,000,000-character overall resource cap, 450 calls, 1,800 s analysis budget by default) with actionable error messages; large protocols are analyzed in ~4–6k-character batches rather than rejected at 320k characters
 
 ### Human coordinator
 - Review each statement with its source page, edit and save, approve, reject
@@ -136,10 +136,13 @@ The model context window is 16,384 tokens by default. On a computer with 8 GB of
 | `CTAI_EXTRACTION_THINK` | `0` | Qwen3 thinking mode for extraction |
 | `CTAI_PATIENT_RELEVANCE_FILTER` | `1` | Enable patient-relevance filtering |
 | `CTAI_EXTRACT_TABLES` | `1` | Enable table extraction |
-| `CTAI_PROTOCOL_CHUNK_TOKENS` / `CTAI_PROTOCOL_CHUNK_CHARS` | `2500` / `8000` | Chunk size limits |
-| `CTAI_PROTOCOL_MAX_INPUT_CHARS` | `320000` | Maximum protocol text accepted |
-| `CTAI_PROTOCOL_MAX_CALLS` | `65` | Maximum model calls per analysis |
-| `CTAI_ANALYSIS_MAX_SECONDS` | `1800` | Analysis time budget |
+| `CTAI_PROTOCOL_CHUNK_TOKENS` / `CTAI_PROTOCOL_CHUNK_CHARS` | `1560` / `5000` | Per-batch chunk size (~4–6k characters) |
+| `CTAI_PROTOCOL_CHUNK_OVERLAP_CHARS` | `400` | Overlap when an oversized section is split |
+| `CTAI_PROTOCOL_MAX_INPUT_CHARS` | `2000000` | Overall resource cap for patient-relevant text |
+| `CTAI_PROTOCOL_MAX_CALLS` | `450` | Maximum model calls per analysis |
+| `CTAI_PROTOCOL_PASS_RETRIES` | `1` | Retries for a failed extraction pass in a batch |
+| `CTAI_ANALYSIS_MAX_SECONDS` | `1800` | Protocol analysis wall-clock budget only (not statement generation) |
+| `CTAI_MODEL_TIMEOUT_SECONDS` | `600` | Per HTTP model-call timeout (analysis and statements) |
 | `CTAI_CHAT_LLM` | `0` | Optional model rewording of chat answers |
 
 ### OpenRouter (optional cloud provider)
@@ -436,7 +439,7 @@ clinical-trial-ai/
 - `exact_match` verification means the statement text was found on a source page. It is **not** proof of clinical correctness or completeness.
 - **No medical advice and no personal eligibility decisions.**
 - Demo content is synthetic/sample material. Do not upload real patient-identifying data.
-- Analysis depends on a local Ollama install and machine resources; local analysis of long protocols is slow, and recall dropped to 23% on an 86-page protocol in the earlier evaluation. Safety sections were the weakest category. Inputs over 320,000 characters or 65 model calls are rejected with an actionable message. No speed-up from the latest optimisations has been measured on a full protocol.
+- Analysis depends on a local Ollama install and machine resources; local analysis of long protocols is slow, and recall dropped to 23% on an 86-page protocol in the earlier evaluation. Safety sections were the weakest category. Overall text over 2,000,000 characters or more than 450 model calls is rejected with an actionable message; failed batches mark analysis incomplete and block publication. Raise `CTAI_ANALYSIS_MAX_SECONDS` for very long runs. No speed-up from the latest optimisations has been measured on a full protocol.
 - Section/heading detection is heuristic; table extraction handles ruled tables only and its text appears alongside the page text in model input.
 - Patient answers are mostly the approved statements themselves; unusual phrasing may get a safe "cannot answer" reply. The assistant is conservative about topics such as blood collection.
 - Authentication is a lightweight, single-server design: no multi-factor sign-in, no "remember me", and the login rate limit is per email (not per IP).

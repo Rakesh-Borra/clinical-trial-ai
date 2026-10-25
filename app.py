@@ -404,9 +404,39 @@ def verification_lookup(
 
 
 def _status_badge(status: Optional[str]) -> str:
+    """Human-readable verification label for display only (internal codes unchanged)."""
     if not status:
-        return "unknown"
-    return status
+        return "Unknown"
+    labels = {
+        "exact_match": "Verified",
+        "not_verified": "Review",
+        "timing_not_found": "Timing not found",
+        "missing_page": "Missing page",
+        "invalid_page": "Invalid page",
+        "illustrative_only": "Example text only",
+    }
+    return labels.get(str(status), str(status).replace("_", " ").capitalize())
+
+
+def _group_attention_warnings(warnings: list[str]) -> dict[str, list[str]]:
+    """Bucket Summary 'Needs review' lines for a compact expander."""
+    groups = {
+        "Conflicting information": [],
+        "Unsupported statements": [],
+        "Duplicates": [],
+        "Other warnings": [],
+    }
+    for warning in warnings:
+        lower = warning.casefold()
+        if "conflict" in lower:
+            groups["Conflicting information"].append(warning)
+        elif any(tok in lower for tok in ("not verified", "unsupported", "not found", "exact_match")):
+            groups["Unsupported statements"].append(warning)
+        elif "duplicate" in lower:
+            groups["Duplicates"].append(warning)
+        else:
+            groups["Other warnings"].append(warning)
+    return {name: items for name, items in groups.items() if items}
 
 
 def is_informational_warning(warning: str) -> bool:
@@ -645,12 +675,16 @@ def render_protocol_summary(pipeline_result: Mapping[str, Any]) -> None:
         w for w in accuracy_warnings if any(marker in w for marker in routine_markers)
     ]
     if attention:
-        st.subheader("Needs review")
-        st.warning(
-            f"{len(attention)} item(s) could not be fully verified. "
-            "Check them against the protocol before approving patient content.\n\n"
-            + "\n".join(f"- {w}" for w in attention)
+        st.markdown(f"**Needs review — {len(attention)} items**")
+        st.caption(
+            "Check these against the protocol before approving patient content. "
+            "Blocking analysis problems remain listed under analysis status above."
         )
+        with st.expander("View details", expanded=False):
+            for group_name, items in _group_attention_warnings(attention).items():
+                st.markdown(f"**{group_name}** ({len(items)})")
+                for warning in items:
+                    st.markdown(f"- {warning}")
     if routine:
         with st.expander(f"{len(routine)} automatic correction(s) made during analysis"):
             for warning in routine:
@@ -675,7 +709,7 @@ def render_protocol_summary(pipeline_result: Mapping[str, Any]) -> None:
             page_label = page if page is not None else "unassigned"
             st.markdown(
                 f"- {statement}  \n"
-                f"  _Source page: {page_label} · Verification: `{status}`_"
+                f"  _Source page: {page_label} · Verification: {status}_"
             )
 
     _render_verified_list(
@@ -709,7 +743,7 @@ def render_protocol_summary(pipeline_result: Mapping[str, Any]) -> None:
             )
             st.markdown(
                 f"- **{visit.visit_name}** — {timing}{procs}  \n"
-                f"  _Source page: {page} · Verification: `{status}`_"
+                f"  _Source page: {page} · Verification: {status}_"
             )
 
     _render_verified_list(
@@ -777,6 +811,25 @@ def publish_block_reason(
         return "Generate patient statements before publishing."
     if guide.analysis_complete is not True:
         return "The patient guide is incomplete or unverified; regenerate it from a complete analysis."
+    if guide.generation_complete is not True:
+        return (
+            "Statement generation is incomplete or paused. Finish or resume "
+            "generation before publishing."
+        )
+    try:
+        from services import guide_jobs
+        from ui.patient_guide_tab import GUIDE_JOB_KEY, analysis_fingerprint
+
+        fingerprint = analysis_fingerprint(pipeline_result)
+        job = guide_jobs.jobs.get(st.session_state.get(GUIDE_JOB_KEY))
+        if job is None:
+            job = guide_jobs.jobs.find_active(
+                f"{st.session_state.get('coordinator_protocol_id') or ''}:{fingerprint}"
+            )
+        if job is not None and job.active:
+            return "Statement generation is still running. Publishing is blocked until it finishes."
+    except Exception:
+        pass
 
     items = guide.all_items()
     if not items:

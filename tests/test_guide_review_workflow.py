@@ -129,24 +129,28 @@ def test_generation_failure_shows_error_and_retry_works_once():
 
 
 def test_job_manager_reuses_active_job_for_same_key():
+    guide_jobs.jobs.reset()
     gate = threading.Event()
     calls = []
 
-    def runner(advance):
+    def runner(advance, cancel_check):
         calls.append(1)
         gate.wait(5)
         advance()
         return "guide"
 
-    first = guide_jobs.jobs.submit("k", runner, 1)
-    second = guide_jobs.jobs.submit("k", runner, 1)
-    assert first == second
-    gate.set()
-    assert guide_jobs.jobs.wait(first)
-    assert len(calls) == 1
-    job = guide_jobs.jobs.get(first)
-    assert job.status == guide_jobs.COMPLETED and job.result == "guide"
-    assert job.fraction == 1.0
+    try:
+        first = guide_jobs.jobs.submit("k", runner, 1)
+        second = guide_jobs.jobs.submit("k", runner, 1)
+        assert first == second
+        gate.set()
+        assert guide_jobs.jobs.wait(first)
+        assert len(calls) == 1
+        job = guide_jobs.jobs.get(first)
+        assert job.status == guide_jobs.COMPLETED and job.result == "guide"
+        assert job.fraction == 1.0
+    finally:
+        guide_jobs.jobs.reset()
 
 
 # --- Task 2: decisions and publication ------------------------------------

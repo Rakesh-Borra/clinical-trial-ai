@@ -29,8 +29,9 @@ class ProgressState:
 
 # stage key -> (label, start %, end %); the pipeline never reports 100.
 STAGES: dict[str, tuple[str, float, float]] = {
-    "extract": ("Reading PDF pages", 0.0, 20.0),
-    "analyze": ("Analyzing protocol with the AI model", 20.0, 80.0),
+    "extract": ("Reading PDF pages", 0.0, 18.0),
+    "analyze": ("Analyzing protocol batches with the AI model", 18.0, 72.0),
+    "merge": ("Combining batch findings", 72.0, 80.0),
     "rescue": ("Checking eligibility criteria", 80.0, 85.0),
     "accuracy": ("Running accuracy checks", 85.0, 92.0),
     "verify": ("Verifying source pages", 92.0, 99.0),

@@ -474,55 +474,99 @@ def _merge_chunk_analyses(
                 merged.append(item)
         return merged
 
+    def flag_detail_conflicts(
+        items: list,
+        group_key,
+        detail_key,
+        label: str,
+    ) -> None:
+        """Keep every distinct variant; warn when the same label disagrees."""
+        groups: dict[str, set[str]] = {}
+        for item in items:
+            name = group_key(item)
+            if not name:
+                continue
+            groups.setdefault(name, set()).add(detail_key(item))
+        for name, details in groups.items():
+            if len(details) > 1:
+                warnings.append(
+                    f"Conflicting {label} across batches for {name!r}: "
+                    f"{len(details)} distinct variants were kept for review."
+                )
+
+    inclusion = distinct(
+        [item for result in analyses for item in result.inclusion_criteria],
+        lambda item: (
+            normalize_text(item.description),
+            item.source_page,
+        ),
+    )
+    exclusion = distinct(
+        [item for result in analyses for item in result.exclusion_criteria],
+        lambda item: (
+            normalize_text(item.description),
+            item.source_page,
+        ),
+    )
+    safety = distinct(
+        [item for result in analyses for item in result.safety_information],
+        lambda item: (
+            normalize_text(item.description),
+            item.source_page,
+        ),
+    )
+    procedures = distinct(
+        [item for result in analyses for item in result.procedures],
+        lambda item: (
+            normalize_text(item.name),
+            normalize_text(item.description or ""),
+            item.source_page,
+        ),
+    )
+    visits = distinct(
+        [item for result in analyses for item in result.visits],
+        lambda item: (
+            normalize_text(item.visit_name),
+            normalize_text(item.timing or ""),
+            tuple(normalize_text(name) for name in item.procedures),
+            item.source_page,
+        ),
+    )
+    patient_information = distinct(
+        [item for result in analyses for item in result.patient_information],
+        lambda item: (
+            item.category,
+            normalize_text(item.description),
+            item.source_page,
+        ),
+    )
+
+    flag_detail_conflicts(
+        procedures,
+        lambda item: normalize_text(item.name),
+        lambda item: normalize_text(item.description or ""),
+        "procedure details",
+    )
+    flag_detail_conflicts(
+        visits,
+        lambda item: normalize_text(item.visit_name),
+        lambda item: (
+            normalize_text(item.timing or "")
+            + "|"
+            + "|".join(normalize_text(name) for name in item.procedures)
+        ),
+        "visit schedule details",
+    )
+
     analysis = ProtocolAnalysis(
         trial_title=merge_metadata("trial_title"),
         protocol_id=merge_metadata("protocol_id"),
-        inclusion_criteria=distinct(
-            [item for result in analyses for item in result.inclusion_criteria],
-            lambda item: (
-                normalize_text(item.description),
-                item.source_page,
-            ),
-        ),
-        exclusion_criteria=distinct(
-            [item for result in analyses for item in result.exclusion_criteria],
-            lambda item: (
-                normalize_text(item.description),
-                item.source_page,
-            ),
-        ),
-        safety_information=distinct(
-            [item for result in analyses for item in result.safety_information],
-            lambda item: (
-                normalize_text(item.description),
-                item.source_page,
-            ),
-        ),
-        procedures=distinct(
-            [item for result in analyses for item in result.procedures],
-            lambda item: (
-                normalize_text(item.name),
-                normalize_text(item.description or ""),
-                item.source_page,
-            ),
-        ),
-        visits=distinct(
-            [item for result in analyses for item in result.visits],
-            lambda item: (
-                normalize_text(item.visit_name),
-                normalize_text(item.timing or ""),
-                tuple(normalize_text(name) for name in item.procedures),
-                item.source_page,
-            ),
-        ),
-        patient_information=distinct(
-            [item for result in analyses for item in result.patient_information],
-            lambda item: (
-                item.category,
-                normalize_text(item.description),
-                item.source_page,
-            ),
-        ),
+        inclusion_criteria=inclusion,
+        exclusion_criteria=exclusion,
+        safety_information=safety,
+        procedures=procedures,
+        visits=visits,
+        patient_information=patient_information,
     )
     return analysis, warnings
 
@@ -588,12 +632,19 @@ def analyze_protocol_in_chunks(
     chunks: Optional[list] = None,
     route: bool = False,
     max_seconds: Optional[float] = None,
+    pass_retries: int = 1,
+    use_pass_cache: bool = False,
 ) -> Tuple[ProtocolAnalysis, List[str], List[dict], List[str], int]:
     """
     Analyze every bounded chunk, then attempt eligibility rescue at most once.
 
+    ``max_input_chars`` is an overall resource ceiling for the combined
+    patient-relevant text, not a single-call limit. Each chunk is validated
+    against ``chunk_chars``. Failed passes are retried up to ``pass_retries``
+    times; a batch that still fails marks processing incomplete.
+
     Returns analysis, warnings, failed-chunk records, incomplete reasons, and
-    the number of Ollama calls made. Limits are checked before any model call.
+    the number of model calls made. Limits are checked before any model call.
     """
     if not protocol_text.strip():
         raise ValueError("Protocol text cannot be empty.")
@@ -606,12 +657,17 @@ def analyze_protocol_in_chunks(
         )
     if rescue_max_chars <= 0:
         raise ValueError("Eligibility rescue input budget must be positive.")
+    if isinstance(pass_retries, bool) or not isinstance(pass_retries, int):
+        raise TypeError("pass_retries must be an integer.")
+    if pass_retries < 0:
+        raise ValueError("pass_retries cannot be negative.")
     if len(protocol_text) > max_input_chars:
         raise ValueError(
             f"This protocol has {len(protocol_text)} characters of "
-            "patient-relevant text, exceeding the configured input limit of "
-            f"{max_input_chars}. No model calls were made. Split the PDF "
-            "into smaller parts or raise CTAI_PROTOCOL_MAX_INPUT_CHARS."
+            "patient-relevant text, exceeding the configured overall resource "
+            f"cap of {max_input_chars}. No model calls were made. Raise "
+            "CTAI_PROTOCOL_MAX_INPUT_CHARS if the machine can accept a "
+            "larger document."
         )
 
     chunk_warnings: list[str] = []
@@ -621,6 +677,20 @@ def analyze_protocol_in_chunks(
         chunk_warnings = list(chunking.warnings)
     else:
         chunks = list(chunks)
+        # Pre-built batches still must respect the per-batch input limit.
+        oversized = [
+            chunk.index + 1
+            for chunk in chunks
+            if len(getattr(chunk, "text", "") or "") > chunk_chars
+        ]
+        if oversized:
+            raise ValueError(
+                "One or more analysis batches exceed the per-batch character "
+                f"limit of {chunk_chars} (chunk numbers {oversized[:12]}"
+                f"{'…' if len(oversized) > 12 else ''}). No model calls were "
+                "made. Lower CTAI_PROTOCOL_CHUNK_TOKENS / "
+                "CTAI_PROTOCOL_CHUNK_CHARS or re-chunk the protocol."
+            )
     max_chunks = (max_calls - 1) // 2
     if len(chunks) > max_chunks:
         required_calls = len(chunks) * 2 + 1
@@ -642,9 +712,21 @@ def analyze_protocol_in_chunks(
     failed_chunks: list[dict] = []
     chunk_analyses: list[ProtocolAnalysis] = []
     calls_made = 0
+    passes_done = 0
 
-    if chunking.warnings:
-        incomplete_reasons.extend(chunking.warnings)
+    # Most chunker messages are informational (overlap trimmed, malformed
+    # marker text retained). Only citation-breaking cases block completeness.
+    for note in chunking.warnings:
+        if "No valid source-page markers found" in note:
+            incomplete_reasons.append(note)
+
+    cache_settings = {
+        "version": ANALYSIS_VERSION,
+        "model": MODEL_NAME,
+        "think": EXTRACTION_THINK,
+        "num_predict": NUM_PREDICT,
+        "num_ctx": NUM_CTX,
+    }
 
     plans = [
         route_passes(
@@ -657,42 +739,107 @@ def analyze_protocol_in_chunks(
         for index, chunk in enumerate(chunks)
     ]
     total_passes = sum(a + b for a, b in plans)
-    report_stage("analyze", 0, total_passes)
+    report_stage(
+        "analyze", 0, total_passes,
+    )
     for chunk, (run_a, run_b) in zip(chunks, plans):
         chunk_failures: list[str] = []
         pass_a: Optional[MetadataEligibilitySafetyExtraction] = None
         pass_b: Optional[VisitsProceduresExtraction] = None
 
-        for pass_name, extract, wanted in (
-            ("Pass A", _pass_a_metadata_eligibility_safety, run_a),
-            ("Pass B", _pass_b_visits_procedures, run_b),
+        for pass_name, extract, model_cls, wanted in (
+            (
+                "Pass A",
+                _pass_a_metadata_eligibility_safety,
+                MetadataEligibilitySafetyExtraction,
+                run_a,
+            ),
+            (
+                "Pass B",
+                _pass_b_visits_procedures,
+                VisitsProceduresExtraction,
+                run_b,
+            ),
         ):
             if not wanted:
                 continue
-            if deadline is not None and time.monotonic() > deadline:
-                detail = (
-                    f"{pass_name} skipped: the analysis time budget of "
-                    f"{max_seconds:.0f}s was reached. Raise "
-                    "CTAI_ANALYSIS_MAX_SECONDS or analyze a smaller document."
+
+            result = None
+            if use_pass_cache:
+                from services import analysis_cache
+
+                cache_key = analysis_cache.make_pass_key(
+                    chunk.text, pass_name, cache_settings,
                 )
-                chunk_failures.append(detail)
-                warnings.append(f"Chunk {chunk.index + 1}: {detail}")
-                continue
-            calls_made += 1
-            try:
-                result = extract(chunk.text)
+                cached = analysis_cache.load_pass(cache_key)
+                if cached is not None:
+                    try:
+                        result = model_cls.model_validate(cached)
+                    except Exception:
+                        result = None
+
+            last_error: Optional[BaseException] = None
+            attempts = 1 + pass_retries
+            for attempt in range(attempts):
+                if result is not None:
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    last_error = RuntimeError(
+                        f"the analysis time budget of {max_seconds:.0f}s was "
+                        "reached. Raise CTAI_ANALYSIS_MAX_SECONDS or analyze "
+                        "a smaller document."
+                    )
+                    break
+                if calls_made >= max_calls:
+                    last_error = RuntimeError(
+                        f"the model call budget of {max_calls} was reached. "
+                        "Raise CTAI_PROTOCOL_MAX_CALLS if you accept a longer "
+                        "run."
+                    )
+                    break
+                calls_made += 1
+                try:
+                    result = extract(chunk.text)
+                    last_error = None
+                    if use_pass_cache:
+                        from services import analysis_cache
+
+                        analysis_cache.store_pass(
+                            analysis_cache.make_pass_key(
+                                chunk.text, pass_name, cache_settings,
+                            ),
+                            result.model_dump(mode="json"),
+                        )
+                except Exception as exc:
+                    last_error = exc
+                    result = None
+                    if attempt + 1 < attempts:
+                        warnings.append(
+                            f"Chunk {chunk.index + 1}: {pass_name} attempt "
+                            f"{attempt + 1} failed ({exc}); retrying."
+                        )
+
+            passes_done += 1
+            report_stage("analyze", passes_done, total_passes)
+
+            if result is not None:
                 if pass_name == "Pass A":
                     pass_a = result
                 else:
                     pass_b = result
-            except Exception as exc:
-                detail = f"{pass_name} failed: {exc}"
-                chunk_failures.append(detail)
-                warnings.append(
-                    f"Chunk {chunk.index + 1} (source pages "
-                    f"{[page.page_number for page in chunk.pages]}): {detail}"
-                )
-            report_stage("analyze", calls_made, total_passes)
+                continue
+
+            if last_error is not None and "time budget" in str(last_error):
+                detail = f"{pass_name} skipped: {last_error}"
+            elif last_error is not None and "call budget" in str(last_error):
+                detail = f"{pass_name} skipped: {last_error}"
+            else:
+                detail = f"{pass_name} failed: {last_error}"
+            chunk_failures.append(detail)
+            warnings.append(
+                f"Chunk {chunk.index + 1} (source pages "
+                f"{[page.page_number for page in chunk.pages]}): {detail}"
+            )
 
         if chunk_failures:
             page_numbers = [
@@ -716,6 +863,7 @@ def analyze_protocol_in_chunks(
             pass_b = VisitsProceduresExtraction()
         chunk_analyses.append(merge_focused_extractions(pass_a, pass_b))
 
+    report_stage("merge")
     analysis, merge_warnings = _merge_chunk_analyses(chunk_analyses)
     warnings.extend(merge_warnings)
     report_stage("rescue")
@@ -727,13 +875,14 @@ def analyze_protocol_in_chunks(
         if page.continuation and page.page_number is not None
     })
     if continuation_pages:
-        warning = (
+        # Intentional splits keep exact text, page numbers, and table headers.
+        # Coverage gaps are reported separately by the pipeline and still block
+        # completeness; the split itself is an informational review note only.
+        warnings.append(
             "Oversized source pages were split across chunk input boundaries: "
-            f"{continuation_pages}. Review extracted statements from those "
-            "pages for completeness."
+            f"{continuation_pages}. Text was preserved with page citations; "
+            "review extracted statements from those pages for completeness."
         )
-        warnings.append(warning)
-        incomplete_reasons.append(warning)
 
     if should_trigger_eligibility_rescue(analysis, protocol_text):
         eligibility_text, selection_notes = select_eligibility_sections(
@@ -751,27 +900,35 @@ def analyze_protocol_in_chunks(
             warnings.append(warning)
             incomplete_reasons.append(warning)
         else:
-            calls_made += 1
-            try:
-                rescue = _pass_eligibility_rescue(eligibility_text)
-                rescue_analysis = ProtocolAnalysis(
-                    inclusion_criteria=rescue.inclusion_criteria,
-                    exclusion_criteria=rescue.exclusion_criteria,
+            if calls_made >= max_calls:
+                warning = (
+                    "Eligibility rescue was skipped because the model call "
+                    f"budget of {max_calls} was already reached."
                 )
-                analysis, rescue_merge_warnings = _merge_chunk_analyses(
-                    [analysis, rescue_analysis]
-                )
-                warnings.extend(rescue_merge_warnings)
-                warnings.append(
-                    "Eligibility rescue ran once after chunk merging and "
-                    f"returned {len(rescue.inclusion_criteria)} inclusion "
-                    f"and {len(rescue.exclusion_criteria)} exclusion "
-                    "criterion object(s)."
-                )
-            except Exception as exc:
-                warning = f"Eligibility rescue failed: {exc}"
                 warnings.append(warning)
                 incomplete_reasons.append(warning)
+            else:
+                calls_made += 1
+                try:
+                    rescue = _pass_eligibility_rescue(eligibility_text)
+                    rescue_analysis = ProtocolAnalysis(
+                        inclusion_criteria=rescue.inclusion_criteria,
+                        exclusion_criteria=rescue.exclusion_criteria,
+                    )
+                    analysis, rescue_merge_warnings = _merge_chunk_analyses(
+                        [analysis, rescue_analysis]
+                    )
+                    warnings.extend(rescue_merge_warnings)
+                    warnings.append(
+                        "Eligibility rescue ran once after chunk merging and "
+                        f"returned {len(rescue.inclusion_criteria)} inclusion "
+                        f"and {len(rescue.exclusion_criteria)} exclusion "
+                        "criterion object(s)."
+                    )
+                except Exception as exc:
+                    warning = f"Eligibility rescue failed: {exc}"
+                    warnings.append(warning)
+                    incomplete_reasons.append(warning)
 
     analysis.analysis_complete = not incomplete_reasons
     return analysis, warnings, failed_chunks, incomplete_reasons, calls_made
