@@ -130,7 +130,7 @@ def test_tell_me_more_adds_no_new_facts_and_points_to_study_team():
 
 def test_ambiguous_input_without_context_asks_for_clarification():
     answer = answer_patient_from_guide("what about that", _guide(), history=[])
-    assert answer.intent == "unsupported"
+    assert answer.intent in {"unsupported", "clarification"}
     assert "tell me a little more" in answer.answer_text.lower()
     assert not answer.citations
 

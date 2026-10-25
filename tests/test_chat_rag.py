@@ -129,6 +129,37 @@ def test_naturalize_accepts_valid_and_rejects_new_numbers(monkeypatch):
         assert naturalize("what are the visits", answer) == answer
 
 
+def test_naturalize_keeps_deterministic_answer_on_insufficient_prefix(monkeypatch):
+    monkeypatch.setenv("CTAI_CHAT_LLM", "1")
+    answer = answer_patient_from_guide("what are the visits", _all_approved())
+    with patch.object(
+        chat_grounding,
+        "chat_completion",
+        return_value=_llm_reply("Not enough information in the approved study guide."),
+    ):
+        assert naturalize("what are the visits", answer) == answer
+
+
+def test_naturalize_passes_follow_up_history_into_prompt(monkeypatch):
+    monkeypatch.setenv("CTAI_CHAT_LLM", "1")
+    guide = _all_approved()
+    first = answer_patient_from_guide("what are the visits", guide)
+    captured = {}
+
+    def _fake_completion(prompt, *args, **kwargs):
+        captured["prompt"] = prompt
+        return _llm_reply("The first visit is the follow-up on Day 30.")
+
+    with patch.object(chat_grounding, "chat_completion", side_effect=_fake_completion):
+        naturalize(
+            "what about the first one",
+            first,
+            history=[{"query": "what are the visits", "answer": first}],
+        )
+    assert "Recent conversation" in captured["prompt"]
+    assert "what are the visits" in captured["prompt"]
+
+
 def test_naturalize_never_rewrites_refusals(monkeypatch):
     monkeypatch.setenv("CTAI_CHAT_LLM", "1")
     answer = answer_patient_from_guide("should I stop my medication", _all_approved())
@@ -137,9 +168,17 @@ def test_naturalize_never_rewrites_refusals(monkeypatch):
         mock.assert_not_called()
 
 
-def test_repeated_identical_answer_is_acknowledged():
+def test_repeated_identical_answer_is_not_prefixed_unless_asked():
     guide = _all_approved()
     first = answer_patient_from_guide("what are the risks", guide)
     again = answer_patient_from_guide("what are the risks", guide, [_entry(first)])
-    assert again.answer_text.startswith("Here is that again")
+    assert not again.answer_text.startswith("Here is that again")
     assert again.citations == first.citations
+
+    repeated = answer_patient_from_guide(
+        "say that again",
+        guide,
+        [{"query": "what are the risks", "answer": first}],
+    )
+    assert repeated.answer_text.startswith("Here is that again")
+    assert repeated.citations == first.citations

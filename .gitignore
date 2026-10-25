@@ -30,3 +30,6 @@ benchmark_logs/
 # Version-managed original PDFs and pre-migration database backups
 data/protocol_pdfs/
 data/backups/
+
+# Real research protocol PDF — do not redistribute until rights are confirmed
+Protocol samples/123_AsthmaDupilumab_NCT02414854.pdf

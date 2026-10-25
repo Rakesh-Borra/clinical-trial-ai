@@ -16,9 +16,11 @@ from typing import List, Optional
 import streamlit as st
 
 from agents.guide_patient_agent import answer_patient_from_guide
+from agents.patient_agent import classify_patient_intent
 from agents.plain_language_agent import display_term, explain_term_query
 from models.plain_language_models import PatientGuide, page_label
-from services.chat_intents import social_answer
+from services.chat_context import is_affirmative_follow_up, resolve_conversation_state
+from services.chat_intents import display_unavailable_message, social_answer
 from services.summary_review import format_summary_markdown
 from services.guide_review import patient_visible_guide, with_coordinator_referral
 from ui import chat_store, split_pane, theme
@@ -59,31 +61,31 @@ def ask(query: str, guide: PatientGuide) -> None:
     if not query:
         return
     guide = patient_visible_guide(guide)
-    # Whole-message greetings only; anything else keeps the full safety path.
-    answer = social_answer(query)
-    if answer is not None:
-        _record_turn(query, answer, guide)
-        return
-    approved_terms = {
-        term.term.casefold()
-        for item in guide.all_items()
-        if item.approved and not item.rejected
-        for term in item.terms_explained
+    history = st.session_state.patient_history
+    state = resolve_conversation_state(history)
+    # Pure greetings stay in the UI social path. Affirmatives ("sure"/"ok")
+    # after an offer go to the agent so they explain approved content.
+    pending_affirm = is_affirmative_follow_up(query) and state.offered_topic
+    answer = None if pending_affirm else social_answer(query)
+    refusal = classify_patient_intent(query) in {
+        "medical_advice_refused",
+        "eligibility_decision_refused",
     }
-    queried_terms = explain_term_query(query)
-    answer = (
-        term_definition_answer(query)
-        if queried_terms
-        and all(term.term.casefold() in approved_terms for term in queried_terms)
-        else None
-    )
+    if answer is None and not refusal:
+        approved_terms = {
+            term.term.casefold()
+            for item in guide.all_items()
+            if item.approved and not item.rejected
+            for term in item.terms_explained
+        }
+        queried_terms = explain_term_query(query)
+        if queried_terms and all(
+            term.term.casefold() in approved_terms for term in queried_terms
+        ):
+            answer = term_definition_answer(query)
     if answer is None:
         answer = with_coordinator_referral(
-            answer_patient_from_guide(
-                query,
-                guide,
-                history=st.session_state.patient_history,
-            )
+            answer_patient_from_guide(query, guide, history=history)
         )
     _record_turn(query, answer, guide)
 
@@ -106,10 +108,36 @@ def version_chip(record: dict) -> str:
 
 
 def _published_protocols() -> dict[str, dict]:
-    """Return only complete, fully approved snapshots saved by publishing."""
+    """
+    Complete, fully approved snapshots that patients may select.
+
+    Session cache is filtered against the database so each study contributes at
+    most its one current published version. Superseded or withdrawn siblings
+    never appear, even if a stale session entry remains. Session-only fixtures
+    (no publication row) are kept for offline tests.
+    """
+    import sqlite3
+
+    from services import review_store
+
     published = st.session_state.get("published_protocols", {})
-    visible = {}
+    stored: dict[str, dict] = {}
+    active_ids: set[str] | None = None
+    try:
+        stored = review_store.load_publications()
+        active_ids = {
+            protocol_id
+            for protocol_id, record in stored.items()
+            if review_store.is_patient_visible_publication(record)
+        }
+    except (sqlite3.Error, OSError):
+        active_ids = None
+
+    known_ids = set(stored)
+    visible: dict[str, dict] = {}
     for protocol_id, record in published.items():
+        if active_ids is not None and protocol_id in known_ids and protocol_id not in active_ids:
+            continue
         guide = record.get("guide")
         name = record.get("name")
         if (
@@ -118,7 +146,22 @@ def _published_protocols() -> dict[str, dict]:
             and is_fully_approved_snapshot(guide)
         ):
             visible[protocol_id] = record
-    return visible
+
+    # Defense in depth: one entry per study_id when version metadata is present.
+    by_study: dict[str, str] = {}
+    trimmed: dict[str, dict] = {}
+    for protocol_id, record in visible.items():
+        study_id = record.get("study_id") or stored.get(protocol_id, {}).get("study_id")
+        if study_id:
+            prior = by_study.get(study_id)
+            if prior is not None and prior != protocol_id:
+                # Prefer the DB-current id when both somehow remain.
+                if active_ids is not None and protocol_id not in active_ids:
+                    continue
+                trimmed.pop(prior, None)
+            by_study[study_id] = protocol_id
+        trimmed[protocol_id] = record
+    return trimmed
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +231,7 @@ def render_guide_panel(guide: Optional[PatientGuide]) -> None:
         ):
             st.html(f'<p style="margin:0 0 .3rem">{theme.e(section.introduction)}</p>')
             if section.unavailable_message:
-                st.caption(section.unavailable_message)
+                st.caption(display_unavailable_message(section.unavailable_message))
                 continue
             approved = [i for i in section.items if i.approved]
             pending = len(section.items) - len(approved)

@@ -241,6 +241,101 @@ def _on_page(statement: str, page_text: str) -> bool:
     return any(_tokens_in_window(_singular_tokens(v), haystack) for v in variants if len(v) > 3)
 
 
+# Field labels the extractor inserts (e.g. "Timing:") that often are not
+# literal words on the PDF page. Stripped before excerpt matching.
+_STRUCTURAL_FIELD_LABEL = re.compile(
+    r"\b(?:"
+    r"timing|schedule|duration|frequency|window|interval|"
+    r"name|title|description|details|notes|procedures|"
+    r"criterion|criteria|requirement|status"
+    r")\s*[.:]\s*",
+    re.IGNORECASE,
+)
+
+# Schedule/visit wording that patients and guides paraphrase freely.
+# Keys are 5-char content stems (same truncation as _content_stems).
+_SCHEDULE_STEM_ALIASES = {
+    "extra": "add",
+    "addit": "add",  # additional
+    "added": "add",
+    "anoth": "add",  # another
+    "check": "fu",  # check-up
+    "follo": "fu",  # follow / follow-up
+    "followup": "fu",
+    "checkup": "fu",
+    "appoi": "visit",  # appointment
+}
+
+
+def strip_structural_labels(text: str) -> str:
+    """Remove extractor field labels such as 'Timing:' or 'Procedures:'."""
+    cleaned = _STRUCTURAL_FIELD_LABEL.sub(" ", text or "")
+    return re.sub(r"\s+", " ", cleaned).strip(" .;:")
+
+
+def page_contains_excerpt(excerpt: str, page_text: str) -> bool:
+    """
+    True when the protocol excerpt appears on the page.
+
+    Extracted visit/procedure text often includes structural labels (Timing:,
+    Procedures:) that are not written on the PDF. Matching ignores those labels
+    while still requiring the clinical words and figures.
+    """
+    if not (excerpt or "").strip() or not (page_text or "").strip():
+        return False
+    page_norm = normalize_text(page_text)
+    page_compact = compact(page_text)
+    seen: set[str] = set()
+    for raw in (excerpt, strip_structural_labels(excerpt)):
+        cand = (raw or "").strip()
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        c = compact(cand)
+        if c and c in page_compact:
+            return True
+        if _on_page(normalize_text(cand), page_norm):
+            return True
+    return False
+
+
+def _aliased_stems(text: str) -> set[str]:
+    return {_SCHEDULE_STEM_ALIASES.get(stem, stem) for stem in _content_stems(text)}
+
+
+def page_supports_paraphrase(claim: str, page_text: str) -> bool:
+    """
+    True when a plain-language claim is a faithful paraphrase of the page.
+
+    All figures in the claim must appear (same passage when the page has
+    lines). Visit-schedule synonyms such as additional/extra and
+    follow-up/check-up are treated as the same stem. Numbers, days, and other
+    medical content stems stay strict.
+    """
+    if not (claim or "").strip() or not (page_text or "").strip():
+        return False
+    claim_nums = _numbers(claim)
+    claim_stems = _aliased_stems(claim)
+    if not claim_stems:
+        return False
+    lines = [normalize_text(line) for line in page_text.splitlines() if line.strip()]
+    segments = lines + [f"{a} {b}" for a, b in zip(lines, lines[1:])]
+    if not segments:
+        segments = [normalize_text(page_text)]
+    for seg in segments:
+        if claim_nums and not claim_nums <= _numbers(seg):
+            continue
+        seg_stems = _aliased_stems(seg)
+        if len(claim_stems & seg_stems) / len(claim_stems) >= 0.8:
+            return True
+    # Single-block page texts (tests / short extracts) have no line breaks.
+    if claim_nums <= _numbers(page_text):
+        page_stems = _aliased_stems(page_text)
+        if len(claim_stems & page_stems) / len(claim_stems) >= 0.8:
+            return True
+    return False
+
+
 def verify_source_pages(
     analysis: ProtocolAnalysis,
     pdf_result: dict,

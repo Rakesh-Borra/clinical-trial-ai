@@ -246,6 +246,15 @@ def _confirm_delete(entry: Mapping[str, Any]) -> None:
         except (protocol_deletion.DeletionError, PermissionError) as exc:
             st.error(str(exc))
             return
+        # Drop deleted ids from session caches so name reuse is not blocked by
+        # a stale published_protocols entry after rerun.
+        protocol_deletion.clear_session_after_delete(
+            st.session_state, result.get("deleted_protocol_ids") or []
+        )
+        # Delayed import avoids a circular import with app.py at module load.
+        from app import sync_published_from_store
+
+        sync_published_from_store()
         if result["pdf_cleanup_incomplete"]:
             st.session_state["delete_notice"] = (
                 "Deleted, but a stored PDF file could not be removed and needs manual cleanup."

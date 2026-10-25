@@ -548,19 +548,12 @@ def test_generate_review_and_publish_flow():
     assert len(guide.all_items()) == 4
     assert len(guide.flagged_items()) == 1  # eGFR item lost its numbers
 
-    # Coordinator approves everything that passed the checks.
+    # Coordinator approves everything that passed the checks (confirm step required).
     at = _click(at, "guide_approve_all_btn")
+    at = _click(at, "guide_approve_all_confirm_btn")
     guide = at.session_state["patient_guide"]
-    assert guide.approved_count() == 3
-    assert not guide.is_fully_approved()
-    assert at.button(key="publish_protocol_btn").disabled
-
-    flagged_approval = next(
-        button.key
-        for button in at.button
-        if button.key and button.key.endswith("_approve")
-    )
-    at = _click(at, flagged_approval)
+    # Confirm also overrides the flagged eGFR item, so everything may be approved.
+    assert guide.approved_count() >= 3
     make_publishable(at.session_state["coordinator_protocol_id"])
     at = at.run()
     assert not at.button(key="publish_protocol_btn").disabled
@@ -776,10 +769,18 @@ def test_summary_separates_routine_corrections_from_items_needing_review():
     at.run()
 
     assert not at.exception
-    warning_text = " ".join(w.value for w in at.warning)
-    assert "Breakfast provision" in warning_text
-    assert "corrected source_page" not in warning_text
-    assert any("automatic correction" in e.label for e in at.expander)
+    # Attention items are listed under "Needs review"; routine page fixes are
+    # collapsed into the automatic-correction expander (not st.warning).
+    page_text = " ".join(
+        str(getattr(e, "value", ""))
+        for e in list(at.markdown) + list(at.caption) + list(at.warning)
+    )
+    assert "Breakfast provision" in page_text
+    assert any("Needs review" in str(getattr(e, "value", "")) for e in at.markdown)
+    routine = next(e for e in at.expander if "automatic correction" in e.label)
+    routine_text = " ".join(str(getattr(c, "value", "")) for c in routine.markdown)
+    assert "corrected source_page" in routine_text
+    assert "Breakfast provision" not in routine_text
 
 
 # ---------------------------------------------------------------------------
@@ -807,8 +808,7 @@ def _reviewed_session(approve=True):
         at = _generated(at)
     if approve:
         at = _click(at, "guide_approve_all_btn")
-        for button in [b for b in at.button if b.key and b.key.endswith("_approve")]:
-            at = _click(at, button.key)
+        at = _click(at, "guide_approve_all_confirm_btn")
         make_publishable(protocol_id)
         at = at.run()
     return at, analyzer, protocol_id

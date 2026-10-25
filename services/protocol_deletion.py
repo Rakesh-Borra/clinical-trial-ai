@@ -194,3 +194,26 @@ def delete_protocol(
         "was_published": was_published,
         "pdf_cleanup_incomplete": leftover,
     }
+
+
+def clear_session_after_delete(session: Any, protocol_ids: List[str]) -> None:
+    """
+    Remove deleted protocol ids from Streamlit session caches.
+
+    Deletion already removed database rows; this keeps published_protocols and
+    coordinator_protocols from treating a deleted study as an active name
+    conflict until the next full sync/restart.
+    """
+    ids = {str(pid) for pid in protocol_ids if pid}
+    if not ids:
+        return
+    published = dict(session.get("published_protocols") or {})
+    protocols = dict(session.get("coordinator_protocols") or {})
+    for pid in ids:
+        published.pop(pid, None)
+        protocols.pop(pid, None)
+    session["published_protocols"] = published
+    session["coordinator_protocols"] = protocols
+    if session.get("patient_active_protocol_id") in ids:
+        session["patient_active_protocol_id"] = None
+        session["patient_history"] = []

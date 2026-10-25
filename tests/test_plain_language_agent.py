@@ -375,12 +375,16 @@ def test_incomplete_analysis_blocks_publication_not_verified_approval():
     assert item.approved is True
     assert guide.is_fully_approved() is False
 
-    # An unverified statement cannot, whatever the coordinator clicks.
+    # Unverified statements may be approved only as an explicit override;
+    # bulk unflagged approval still skips them.
     other = guide.who_can_join.items[1]
     other.source_status = "unverified"
     other.source_issue = "not found on the cited page"
-    with pytest.raises(ValueError, match="verification warnings"):
-        approve_item(other)
+    approve_item(other)
+    assert other.approved is True
+    assert other.override is True
+    assert other.override_warnings
+    unapprove_item(other)
     approve_all_unflagged(guide)
     assert other.approved is False
 

@@ -9,8 +9,18 @@ def _offline_rewriter(original, section, feedback=None):
 def isolated_review_db(tmp_path, monkeypatch):
     """Every test gets its own empty SQLite file; data/ctai.db is never touched."""
     monkeypatch.setenv("CTAI_DB_PATH", str(tmp_path / "ctai_test.db"))
-    # A developer's shell must not change which provider or key tests see.
-    for name in ("LLM_PROVIDER", "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "OPENROUTER_MODEL"):
+    # A developer's shell/.env must not change providers, enable chat LLM, or
+    # trigger live API calls. Tests that need CTAI_CHAT_LLM=1 set it themselves
+    # and mock chat_completion.
+    for name in (
+        "LLM_PROVIDER",
+        "CTAI_MODEL_PROVIDER",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_MODEL",
+        "CTAI_OPENROUTER_MODEL",
+        "CTAI_CHAT_LLM",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 

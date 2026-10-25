@@ -47,6 +47,7 @@ from models.plain_language_models import (
     page_label,
 )
 from services import authz, benchmark_log, guide_jobs, review_store, version_store
+from services.chat_intents import display_unavailable_message
 from services.guide_quality import audit_guide_quality, group_findings
 from services.guide_review import (
     ALL,
@@ -934,7 +935,7 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
         if section.unavailable_message and active_filter == ALL:
             number += len(section.items)
             st.subheader(section.title)
-            st.caption(section.unavailable_message)
+            st.caption(display_unavailable_message(section.unavailable_message))
             continue
         if not section_items:
             number += len(section.items)

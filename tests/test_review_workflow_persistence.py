@@ -99,17 +99,21 @@ def test_edit_that_adds_unsupported_number_fails_reverification():
 
 
 def test_edited_statement_cannot_bypass_verification():
+    """Forced approval without Approve must not publish; Approve records an override."""
     result = _eight_statement_result()
     guide = _approved_guide(result)
     edit_item(_first(guide), NEW_TEXT)
-    _first(guide).approved = True  # forced, bypassing the UI
+    assert _first(guide).verification == "needs_reverification"
+    _first(guide).approved = True  # forced, bypassing Approve / override recording
     assert publish_block_reason(guide, result) is not None
-    try:
-        approve_item(_first(guide))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("approve_item must refuse unverified edits")
+
+    # The real Approve path is allowed: it records a coordinator override.
+    edit_item(_first(guide), NEW_TEXT)
+    approve_item(_first(guide))
+    assert _first(guide).approved and _first(guide).override
+    assert "Edited wording has not been reverified" in " ".join(
+        _first(guide).override_warnings or []
+    )
 
 
 # --- publication -----------------------------------------------------------

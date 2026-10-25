@@ -24,7 +24,13 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from models.plain_language_models import GuideItem, PatientGuide
 from services import review_store, version_store
-from services.source_verifier import _on_page, authoritative_page_texts, compact, normalize_text
+from services.source_verifier import (
+    authoritative_page_texts,
+    compact,
+    normalize_text,
+    page_contains_excerpt,
+    page_supports_paraphrase,
+)
 
 SIMILARITY = 0.55
 PageTexts = Mapping[int, str]
@@ -119,10 +125,16 @@ def _supported(side: Optional[Mapping[str, Any]], pages: Optional[PageTexts]) ->
         return None
     page = side.get("page")
     text = pages.get(page) if page is not None else None
-    excerpt = side.get("original_text") or ""
-    if not text or not excerpt.strip():
+    if not text:
         return False
-    return compact(excerpt) in compact(text) or _on_page(normalize_text(excerpt), text)
+    excerpt = (side.get("original_text") or "").strip()
+    if excerpt and page_contains_excerpt(excerpt, text):
+        return True
+    # Faithful plain-language paraphrase of the same fact (numbers stay strict).
+    plain = (side.get("plain_text") or "").strip()
+    if plain and page_supports_paraphrase(plain, text):
+        return True
+    return False
 
 
 def default_page_texts(protocol_id: str) -> Optional[PageTexts]:

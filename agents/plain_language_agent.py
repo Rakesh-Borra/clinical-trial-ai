@@ -870,13 +870,20 @@ def generate_patient_guide(
             getattr(guide, spec.attr).items.append(item)
     guide.generation_complete = (
         not cancelled
-        and len(specs) > 0
-        and all(spec.item_id in by_id for spec in specs)
-        and not any(
-            by_id[spec.item_id].generation_failed and not by_id[spec.item_id].rejected
-            for spec in specs
+        and (
+            len(specs) == 0
+            or (
+                all(spec.item_id in by_id for spec in specs)
+                and not any(
+                    by_id[spec.item_id].generation_failed
+                    and not by_id[spec.item_id].rejected
+                    for spec in specs
+                )
+            )
         )
     )
+    # Empty protocols (no extractable statements) still finalize so sections
+    # can show the standard unavailable note; cancelled partial runs do not.
     if guide.generation_complete:
         return finalize_guide(guide)
     return guide

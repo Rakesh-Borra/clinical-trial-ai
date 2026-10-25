@@ -363,3 +363,160 @@ def test_deleting_current_v2_does_not_republish_superseded_v1():
     assert version_store.get_version("v1")["is_current"] == 0
     assert {p for p, r in review_store.load_publications().items()
             if r["status"] == review_store.PUBLISHED} == set()
+
+
+# --- published name reuse after deletion ------------------------------------
+
+
+def test_clear_session_after_delete_drops_published_name_cache():
+    guide = make_guide()
+    session = {
+        "published_protocols": {
+            "gone": {"name": NAME, "guide": guide},
+            "keep": {"name": "Other Study", "guide": guide},
+        },
+        "coordinator_protocols": {
+            "gone": {"name": NAME},
+            "keep": {"name": "Other Study"},
+        },
+        "patient_active_protocol_id": "gone",
+        "patient_history": [{"query": "hi"}],
+    }
+    protocol_deletion.clear_session_after_delete(session, ["gone"])
+    assert "gone" not in session["published_protocols"]
+    assert "keep" in session["published_protocols"]
+    assert "gone" not in session["coordinator_protocols"]
+    assert session["patient_active_protocol_id"] is None
+    assert session["patient_history"] == []
+
+
+def test_deleted_published_name_is_reusable_and_self_publish_is_not_a_conflict(
+    monkeypatch,
+):
+    import app
+
+    _save("old")
+    review_store.publish("old", NAME, make_guide())
+    _save("new")
+
+    class _State(dict):
+        pass
+
+    state = _State()
+    state.update(
+        {
+            "coordinator_protocol_id": "new",
+            "coord_study_id": None,
+            "published_protocols": {
+                "old": {"name": NAME, "guide": make_guide()},
+            },
+            "coordinator_protocols": {"new": {"name": NAME}, "old": {"name": NAME}},
+            "patient_active_protocol_id": None,
+        }
+    )
+    monkeypatch.setattr(app.st, "session_state", state)
+
+    # Stale session still lists the old publication, but DB says it is active —
+    # name must stay blocked for a different study.
+    assert app._other_active_published_uses_name("new", NAME) is True
+
+    result = _delete("old")
+    protocol_deletion.clear_session_after_delete(
+        state, result["deleted_protocol_ids"]
+    )
+    app.sync_published_from_store()
+
+    assert "old" not in state["published_protocols"]
+    assert review_store.publication_status("old") is None
+    # Name is free for the remaining protocol.
+    assert app._other_active_published_uses_name("new", NAME) is False
+    # Re-publishing / checking the same id never conflicts with itself.
+    review_store.publish("new", NAME, make_guide())
+    state["coordinator_protocol_id"] = "new"
+    state["published_protocols"]["new"] = {"name": NAME, "guide": make_guide()}
+    assert app._other_active_published_uses_name("new", NAME) is False
+
+
+def test_deleted_unpublished_name_is_reusable(monkeypatch):
+    import app
+
+    _save("draft-only")
+    _save("other")
+    state = {
+        "coordinator_protocol_id": "other",
+        "coord_study_id": None,
+        "published_protocols": {},
+        "coordinator_protocols": {
+            "draft-only": {"name": NAME},
+            "other": {"name": NAME},
+        },
+        "patient_active_protocol_id": None,
+    }
+    monkeypatch.setattr(app.st, "session_state", state)
+    assert app._other_active_published_uses_name("other", NAME) is False
+    _delete("draft-only")
+    protocol_deletion.clear_session_after_delete(state, ["draft-only"])
+    assert "draft-only" not in state["coordinator_protocols"]
+    assert app._other_active_published_uses_name("other", NAME) is False
+
+
+def test_active_published_duplicate_name_across_studies_remains_blocked(monkeypatch):
+    import app
+
+    _save("study-a")
+    review_store.publish("study-a", NAME, make_guide())
+    _save("study-b")
+    state = {
+        "coordinator_protocol_id": "study-b",
+        "coord_study_id": None,
+        "published_protocols": {
+            "study-a": {"name": NAME, "guide": make_guide()},
+        },
+        "coordinator_protocols": {
+            "study-a": {"name": NAME},
+            "study-b": {"name": NAME},
+        },
+        "patient_active_protocol_id": None,
+    }
+    monkeypatch.setattr(app.st, "session_state", state)
+    assert app._other_active_published_uses_name("study-b", NAME) is True
+
+
+def test_stale_session_entry_does_not_block_name_after_db_delete(monkeypatch):
+    """Even before session clear, publish name checks trust the database."""
+    import app
+
+    _save("old")
+    review_store.publish("old", NAME, make_guide())
+    _save("new")
+    state = {
+        "coordinator_protocol_id": "new",
+        "coord_study_id": None,
+        "published_protocols": {
+            "old": {"name": NAME, "guide": make_guide()},
+        },
+        "coordinator_protocols": {"new": {"name": NAME}},
+        "patient_active_protocol_id": None,
+    }
+    monkeypatch.setattr(app.st, "session_state", state)
+    assert app._other_active_published_uses_name("new", NAME) is True
+    _delete("old")
+    # Session still has the stale "old" entry, but the DB row is gone.
+    assert "old" in state["published_protocols"]
+    assert review_store.publication_status("old") is None
+    assert app._other_active_published_uses_name("new", NAME) is False
+
+
+def test_restart_loads_only_remaining_published_after_delete():
+    _save("old")
+    review_store.publish("old", NAME, make_guide())
+    _save("keeper")
+    review_store.publish("keeper", "Keeper Study", make_guide())
+    _delete("old")
+    patient = AppTest.from_file(APP_PATH, default_timeout=30)
+    sign_in_as(patient.session_state, "patient")
+    patient = patient.run()
+    published = patient.session_state["published_protocols"]
+    assert "old" not in published
+    assert "keeper" in published
+    assert published["keeper"]["name"] == "Keeper Study"
