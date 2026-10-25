@@ -1,4 +1,5 @@
 
+import os
 import re
 from pathlib import Path
 
@@ -48,6 +49,50 @@ def _looks_garbled(text: str) -> bool:
 def _extract_selectable_text(page) -> str:
     """Extract selectable text in approximate reading order."""
     return page.get_text("text", sort=True).strip()
+
+
+def _looks_tabular(text: str) -> bool:
+    """Cheap gate: table pages have wide column gaps or many short lines."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 4:
+        return False
+    gapped = sum(1 for ln in lines if re.search(r"\S {3,}\S|\t", ln))
+    short = sum(1 for ln in lines if len(ln) <= 25)
+    return gapped >= 3 or (len(lines) >= 12 and short / len(lines) >= 0.5)
+
+
+def _extract_tables(page, text: str) -> list[dict]:
+    """
+    Extract ruled tables as rows of cell text, in addition to the page text.
+
+    The page "text" is never changed (it is the verification source); tables
+    are an extra, optional view that keeps row/column structure. Any failure
+    simply yields no tables.
+    """
+    if os.getenv("CTAI_EXTRACT_TABLES", "1").strip().lower() in {"0", "false", "off", "no"}:
+        return []
+    if not _looks_tabular(text) or not hasattr(page, "find_tables"):
+        return []
+    try:
+        found = page.find_tables()
+        tables = []
+        for table in getattr(found, "tables", found):
+            # Cell text is re-read from the page inside each cell's box:
+            # table.extract() can drop spaces or split values like "+/- 3".
+            rows = [
+                [
+                    " ".join(page.get_text("text", clip=pymupdf.Rect(cell)).split())
+                    if cell else ""
+                    for cell in row.cells
+                ]
+                for row in table.rows
+            ]
+            rows = [r for r in rows if any(c.strip() for c in r)]
+            if len(rows) >= 2 and max(len(r) for r in rows) >= 2:
+                tables.append({"rows": rows})
+        return tables
+    except Exception:
+        return []
 
 
 def _page_has_embedded_images(page) -> bool:
@@ -252,14 +297,19 @@ def extract_pdf(file_path: str) -> dict:
                         "extractable text."
                     )
 
-                pages.append({
+                page_entry = {
                     "page_number": page_number,
                     "text": text,
                     "character_count": len(text),
                     "requires_ocr": not _has_meaningful_text(text),
                     "ocr_applied": ocr_applied,
                     "garbled_text_detected": garbled,
-                })
+                }
+                if not garbled and _has_meaningful_text(selectable_text):
+                    tables = _extract_tables(page, selectable_text)
+                    if tables:
+                        page_entry["tables"] = tables
+                pages.append(page_entry)
                 report_stage("extract", page_number, page_total)
 
             return {

@@ -100,14 +100,13 @@ def test_pipeline_applies_accuracy_checks():
     ):
         result = analyze_protocol_pdf("accuracy_protocol.pdf")
 
-    # Invented title grounded to null, then recovered from PROTOCOL TITLE.
+    # Invented title is replaced by the labeled PROTOCOL TITLE line.
     assert result["analysis"].trial_title == "Accuracy Study"
     assert result["analysis"].protocol_id == "ACC-001"
     assert result["analysis"].inclusion_criteria[0].source_page == 1
     assert result["verification"][0]["status"] == "exact_match"
-    assert any("trial_title" in w for w in result["accuracy_warnings"])
     assert any(
-        "recovered from labeled source field" in w
+        "replaced by the labeled source title" in w
         for w in result["accuracy_warnings"]
     )
     assert any("HbA1c" in w for w in result["accuracy_warnings"])

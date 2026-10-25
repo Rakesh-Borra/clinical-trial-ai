@@ -257,18 +257,22 @@ DARK_WORKSPACE_CSS = """
   color:var(--teal-text);
 }
 .stApp:not(:has(.st-key-landing_shell)) .st-key-topbar {
-  padding:.45rem .65rem;
+  padding:0 .6rem;
+  min-height:48px;
+  max-height:50px;
+  display:flex;
+  align-items:center;
   border:1px solid var(--line);
-  border-radius:18px;
+  border-radius:14px;
   background:rgba(19,22,28,.78);
   box-shadow:0 12px 50px rgba(0,0,0,.18);
   backdrop-filter:blur(18px);
-  margin-bottom:1.8rem;
+  margin-bottom:.9rem;
 }
 .stApp:not(:has(.st-key-landing_shell)) .st-key-topbar .stButton > button {
   width:auto;
-  min-height:2.55rem;
-  padding:.35rem .7rem;
+  min-height:2.1rem;
+  padding:.2rem .7rem;
   border:1px solid transparent;
   border-radius:12px;
   background:transparent;
@@ -291,7 +295,7 @@ DARK_WORKSPACE_CSS = """
 }
 .stApp:not(:has(.st-key-landing_shell)) .st-key-topbar [data-testid="stPopoverButton"] {
   width:100%;
-  min-height:2.45rem;
+  min-height:2.1rem;
   border:1px solid var(--line);
   border-radius:12px;
   background:rgba(255,255,255,.035);
@@ -1125,6 +1129,35 @@ LANDING_CSS = """
   background: rgba(169,201,214,.1);
   color: var(--landing-text);
 }
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stElementContainer"]:has([data-testid="stRadio"]),
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadio"] {
+  width: 100%;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioGroup"] {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: .6rem;
+  width: 100%;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] > div > div:first-child:not(:only-child) {
+  display: none;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] p {
+  overflow-wrap: normal;
+  word-break: normal;
+  text-align: center;
+  width: 100%;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioGroup"] > div,
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] {
+  width: 100%;
+  box-sizing: border-box;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stRadioOption"] {
+  justify-content: center;
+  margin: 0;
+  min-width: 0;
+}
 .stApp:has(.st-key-landing_shell) .ctai-demo-notice {
   margin-top: 1rem;
   padding: .75rem .85rem;
@@ -1185,6 +1218,16 @@ LANDING_CSS = """
   .stApp:has(.st-key-landing_shell) .ctai-research-art { margin-top: 1.2rem; }
   .stApp:has(.st-key-landing_shell) .ctai-role-panel { padding: 1.25rem; }
 }
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primaryFormSubmit"],
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primary"] {
+  color: #0b1218 !important;
+  font-weight: 600;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primaryFormSubmit"] p,
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel button[kind="primary"] p {
+  color: #0b1218 !important;
+}
+.stApp:has(.st-key-landing_shell) .st-key-landing_role_panel [data-testid="stForm"] { padding: 0; }
 @media (prefers-reduced-motion: reduce) {
   .stApp:has(.st-key-landing_shell) *,
   .stApp:has(.st-key-landing_shell) *::before,
@@ -1199,10 +1242,43 @@ LANDING_CSS = """
 
 
 
+_RB = ".stApp:not(:has(.st-key-landing_shell)):has(.st-key-review_bar)"
+REVIEW_BAR_CSS = f"""
+/* ---------- coordinator review: sticky nav + compact status bar ---------- */
+{_RB} .block-container {{ padding-top:.5rem; }}
+{_RB} [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) {{ position:sticky; top:0; z-index:300; }}
+{_RB} .st-key-topbar {{ background:#0E1218; margin-bottom:0; height:50px; }}
+{_RB} [data-testid="stLayoutWrapper"]:has(> .st-key-review_bar) {{ position:sticky; top:54px; z-index:290; }}
+{_RB} .st-key-review_bar {{
+  position:relative; box-sizing:border-box; min-height:58px; max-width:100%; overflow:hidden;
+  padding:.4rem .8rem .55rem; gap:0; background:#0E1218;
+  border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.28);
+}}
+{_RB} .st-key-review_bar [data-testid="stHorizontalBlock"] {{ gap:.6rem; flex-wrap:nowrap; align-items:center; }}
+{_RB} .st-key-review_bar [data-testid="stColumn"] {{ min-width:0; }}
+{_RB} .ctai-rbar-stats {{ display:flex; flex-wrap:wrap; gap:.25rem 1.1rem; align-items:baseline; font-size:.78rem; color:var(--body); }}
+{_RB} .ctai-rstat b {{ margin-left:.35rem; font-size:.95rem; color:var(--ink); font-weight:750; }}
+{_RB} .ctai-rstat.ok b {{ color:#59B3A6; }}
+{_RB} .ctai-rstat.warn b {{ color:#E3B15C; }}
+{_RB} .ctai-rstat.bad b {{ color:#E58A8A; }}
+{_RB} .st-key-review_bar .stButton > button,
+{_RB} .st-key-review_bar [data-testid="stPopoverButton"] {{ min-height:2.1rem; padding:.2rem .7rem; font-size:.82rem; }}
+{_RB} .st-key-review_bar [data-testid="stElementContainer"]:has(.ctai-rbar-progress) {{
+  position:absolute; left:0; right:0; bottom:0; height:3px; margin:0; }}
+{_RB} .ctai-rbar-progress {{ height:3px; background:rgba(255,255,255,.08); }}
+{_RB} .ctai-rbar-progress > div {{ height:100%; background:linear-gradient(90deg,#2A7D74,#59B3A6); transition:width .4s ease; }}
+@media (max-width: 900px) {{
+  {_RB} .st-key-review_bar [data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; flex-direction:row !important; }}
+  {_RB} .st-key-review_bar [data-testid="stColumn"]:first-child {{ flex:1 1 100% !important; width:100% !important; }}
+  {_RB} .st-key-review_bar [data-testid="stColumn"]:not(:first-child) {{ flex:1 1 calc(50% - .6rem) !important; width:auto !important; }}
+}}
+"""
+
+
 def inject_css() -> None:
     """Apply the Clinical Trial AI theme to the page."""
     st.markdown(
-        f"<style>{CSS}{DARK_WORKSPACE_CSS}</style>",
+        f"<style>{CSS}{DARK_WORKSPACE_CSS}{REVIEW_BAR_CSS}</style>",
         unsafe_allow_html=True,
     )
 

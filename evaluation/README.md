@@ -24,7 +24,7 @@ evaluation/
 
 ## Adding a real protocol
 
-1. Download a public protocol PDF from ClinicalTrials.gov and save it in `data/protocols/` as
+1. Download a public protocol PDF from ClinicalTrials.gov and save it outside the repo (e.g. a `Protocol samples` folder) and point `"pdf"` in the ground-truth JSON at it, named
    `<NCT number>.pdf` (that folder is git-ignored; the answer key is committed, the PDF is not).
    The three protocols used so far: NCT03727854, NCT03829514, NCT02879383. Each answer key's
    `"source"` field links to the study page.

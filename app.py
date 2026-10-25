@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sqlite3
 import tempfile
 import uuid
 from pathlib import Path
@@ -21,10 +22,11 @@ from models.plain_language_models import PatientGuide
 from models.protocol_models import ProtocolAnalysis
 from agents.guide_patient_agent import APPROVED_STATUS
 from models.protocol_models import ProtocolAnalysis
-from services import analysis_jobs
+from services import analysis_jobs, authz, review_store
 from services.model_provider import provider_display_name
 from services.protocol_pipeline import analyze_protocol_pdf
-from ui import theme
+from services import benchmark_log
+from ui import auth_pages, theme
 from ui.landing import (
     COORDINATOR,
     NAME_KEY,
@@ -37,11 +39,24 @@ from ui.landing import (
     render_landing,
     render_top_bar,
 )
+from services.coverage import build_coverage, coverage_block_reason
 from services.guide_review import build_published_snapshot, decision_block_reason
+from services.summary_review import is_summary_approved, summary_publish_block_reason
+from ui.summary_panel import (
+    render_coverage_panel,
+    render_summary_generation,
+    render_summary_panel,
+)
+from agents.plain_language_agent import guide_to_markdown
 from ui.patient_guide_tab import (
+    GUIDE_KEY,
+    GUIDE_SOURCE_KEY,
+    analysis_fingerprint,
     clear_guide,
     get_guide,
     is_fully_approved_snapshot,
+    persist_review,
+    purge_item_widget_state,
     render_guide_review_tab,
 )
 from ui.patient_view import render_patient_workspace
@@ -198,9 +213,13 @@ def active_analysis_job() -> Optional[analysis_jobs.JobSnapshot]:
 
 def start_analysis() -> None:
     """Start analysis in the background for the current upload (idempotent)."""
+    authz.require_coordinator()
     if st.session_state.get("pipeline_result") is not None or active_analysis_job():
         return
     st.session_state["analysis_error"] = None
+    benchmark_log.name_file(
+        st.session_state.temp_pdf_path, st.session_state.get("uploaded_name") or ""
+    )
     st.session_state["analysis_job_id"] = analysis_jobs.jobs.submit(
         run_protocol_analysis,
         st.session_state.temp_pdf_path,
@@ -754,7 +773,25 @@ def publish_block_reason(
     if reason:
         return reason
 
-    if not is_fully_approved_snapshot(build_published_snapshot(guide)):
+    snapshot = build_published_snapshot(guide)
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if not protocol_id:
+        # Coverage overrides and the approved summary are stored per protocol.
+        return "Cannot publish: the protocol has no active identifier. Upload it again."
+    try:
+        reason = coverage_block_reason(
+            build_coverage(pipeline_result, snapshot),
+            review_store.load_coverage_overrides(protocol_id),
+            pipeline_result.get("analysis_complete") is True,
+        ) or summary_publish_block_reason(
+            review_store.load_summary(protocol_id), snapshot
+        )
+    except sqlite3.Error as exc:
+        return f"Cannot publish: review data could not be read ({exc})."
+    if reason:
+        return reason
+
+    if not is_fully_approved_snapshot(snapshot):
         return "The patient guide did not pass final approval validation."
     return None
 
@@ -793,9 +830,24 @@ def _guide_content(guide: Any) -> Optional[dict]:
     return content
 
 
+def _approved_summary_text() -> Optional[str]:
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if not protocol_id:
+        return None
+    try:
+        record = review_store.load_summary(protocol_id)
+    except sqlite3.Error:
+        return None
+    return record["approved_text"] if is_summary_approved(record) else None
+
+
 def _publishable(guide: Any) -> Any:
     """What publishing this guide would save (rejected statements removed)."""
-    return build_published_snapshot(guide) if isinstance(guide, PatientGuide) else None
+    if not isinstance(guide, PatientGuide):
+        return None
+    snapshot = build_published_snapshot(guide)
+    snapshot.summary = _approved_summary_text()
+    return snapshot
 
 
 def published_matches_current(
@@ -812,6 +864,10 @@ def published_matches_current(
 
 def publish_current_protocol() -> tuple[bool, str]:
     """Save an approved snapshot for the patient portal after all checks pass."""
+    try:
+        authz.require_coordinator()
+    except authz.AuthorizationError as exc:
+        return False, str(exc)
     protocol_id = st.session_state.get("coordinator_protocol_id")
     protocol_name = current_protocol_name()
     guide = get_guide()
@@ -827,15 +883,137 @@ def publish_current_protocol() -> tuple[bool, str]:
         return False, reason
 
     published = dict(st.session_state.get("published_protocols", {}))
-    snapshot = build_published_snapshot(guide)
+    if any(
+        other_id != protocol_id
+        and isinstance(record, Mapping)
+        and str(record.get("name", "")).casefold() == protocol_name.casefold()
+        for other_id, record in published.items()
+    ):
+        return False, (
+            "Another published protocol already uses this name. Choose a "
+            "different protocol name in Step 1B."
+        )
+    snapshot = _publishable(guide)
     snapshot.trial_title = protocol_name
     snapshot.protocol_id = None
+    try:
+        review_store.publish(protocol_id, protocol_name, snapshot)
+        review_store.log_action(
+            protocol_id, "published", f"{len(snapshot.all_items())} statement(s)"
+        )
+    except (sqlite3.Error, OSError) as exc:
+        return False, f"Publishing failed; nothing was changed for patients: {exc}"
     published[protocol_id] = {
         "name": protocol_name,
         "guide": snapshot,
     }
     st.session_state["published_protocols"] = published
+    persist_review()
     return True, PUBLISHED_MESSAGE
+
+
+UNPUBLISHED_MESSAGE = (
+    "Unpublished. This protocol is no longer visible to patients or the "
+    "Patient Assistant."
+)
+
+
+def unpublish_current_protocol() -> tuple[bool, str]:
+    """Withdraw the published snapshot so patients and the assistant lose it."""
+    try:
+        authz.require_coordinator()
+    except authz.AuthorizationError as exc:
+        return False, str(exc)
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if not protocol_id or protocol_id not in st.session_state.get("published_protocols", {}):
+        return False, "This protocol is not published."
+    try:
+        review_store.unpublish(protocol_id)
+        review_store.log_action(protocol_id, "unpublished", "")
+    except (sqlite3.Error, OSError) as exc:
+        return False, f"Unpublish failed; the protocol is still published: {exc}"
+    published = dict(st.session_state["published_protocols"])
+    published.pop(protocol_id, None)
+    st.session_state["published_protocols"] = published
+    return True, UNPUBLISHED_MESSAGE
+
+
+def sync_published_from_store() -> None:
+    """
+    Make the stored publication state the truth for patients.
+
+    Published rows replace the session copy, withdrawn rows remove it, and
+    protocols the database does not know about are left alone. This is what
+    lets a restart (or another browser session) see the latest decisions.
+    """
+    try:
+        stored = review_store.load_publications()
+    except (sqlite3.Error, OSError):
+        return
+    published = dict(st.session_state.get("published_protocols", {}))
+    changed = False
+    for protocol_id, record in stored.items():
+        if record["status"] == review_store.PUBLISHED:
+            current = published.get(protocol_id)
+            if current is None or (
+                isinstance(current, Mapping)
+                and is_fully_approved_snapshot(current.get("guide"))
+                and not (
+                    current.get("name") == record["name"]
+                    and current.get("guide") == record["guide"]
+                )
+            ):
+                published[protocol_id] = {
+                    "name": record["name"],
+                    "guide": record["guide"],
+                }
+                changed = True
+        elif published.pop(protocol_id, None) is not None:
+            changed = True
+    if changed:
+        st.session_state["published_protocols"] = published
+
+
+def restore_last_draft() -> bool:
+    """
+    Reopen the most recently saved review after a restart or refresh.
+
+    Only runs when the coordinator has nothing open, and never replaces
+    anything that is already in the session.
+    """
+    if (
+        st.session_state.get("pipeline_result") is not None
+        or st.session_state.get("coordinator_protocol_id")
+        or active_analysis_job() is not None
+    ):
+        return False
+    try:
+        draft = review_store.load_latest_draft()
+        names = review_store.draft_names()
+    except (sqlite3.Error, OSError):
+        return False
+    protocols = st.session_state.setdefault("coordinator_protocols", {})
+    for saved_id, saved_name in names.items():
+        protocols.setdefault(saved_id, {"name": saved_name})
+    if draft is None or draft["pipeline"] is None:
+        return False
+    protocol_id = draft["protocol_id"]
+    protocols[protocol_id] = {
+        "name": draft["name"],
+        "fingerprint": draft["upload_fingerprint"],
+        "uploaded_name": draft["uploaded_name"],
+    }
+    purge_item_widget_state()
+    st.session_state.pipeline_result = draft["pipeline"]
+    st.session_state.coordinator_protocol_id = protocol_id
+    st.session_state.uploaded_name = draft["uploaded_name"]
+    st.session_state.uploaded_fingerprint = draft["upload_fingerprint"]
+    st.session_state[GUIDE_KEY] = draft["guide"]
+    st.session_state[GUIDE_SOURCE_KEY] = analysis_fingerprint(draft["pipeline"])
+    st.session_state["coord_max_step"] = len(STEPS) - 1
+    st.session_state["_coord_goto"] = STEPS[2]
+    st.session_state["_draft_restored"] = draft["name"] or draft["uploaded_name"] or "your protocol"
+    return True
 
 
 def _need_analysis() -> bool:
@@ -926,6 +1104,7 @@ def render_upload_step() -> None:
                                 "fingerprint": st.session_state.uploaded_fingerprint,
                                 "uploaded_name": st.session_state.uploaded_name,
                             }
+                            persist_review()
                             st.success(f"Protocol name saved: **{protocol_name}**")
                 if current_protocol_name():
                     st.caption(f"Saved name: **{current_protocol_name()}**")
@@ -1037,7 +1216,22 @@ def render_summary_step() -> None:
         "Next, it turns these into plain-language statements for you to check."
     )
     render_analysis_completeness(result)
+    relevance = result.get("relevance") or {}
+    if relevance.get("skipped_pages"):
+        pages = ", ".join(str(p["page"]) for p in relevance["skipped_pages"])
+        st.caption(
+            f"Pages not sent to the AI because every section looked purely administrative: {pages}. "
+            "The full protocol is still used to check page citations."
+        )
+    audit = result.get("completeness_audit") or {}
+    if audit.get("needs_attention"):
+        items = [*(f"No {m} found" for m in audit.get("missing", [])),
+                 *audit.get("uncertain", []), *audit.get("notes", [])]
+        st.caption("Worth double-checking against the protocol: " + "; ".join(items) + ".")
     render_protocol_summary(result)
+    protocol_id = st.session_state.get("coordinator_protocol_id")
+    if protocol_id:
+        render_summary_generation(result, protocol_id)
     if st.button("Continue to review statements", type="primary", key="continue_review_btn"):
         _go_to(STEPS[2])
 
@@ -1049,36 +1243,94 @@ def render_review_step() -> None:
     protocol_name = current_protocol_name()
     if protocol_name:
         st.caption(f"Protocol: **{protocol_name}**")
-    render_guide_review_tab(st.session_state.pipeline_result)
-    if get_guide() is None:
+    publish_col = render_guide_review_tab(st.session_state.pipeline_result)
+    if publish_col is None or get_guide() is None:
         # Statements are still being generated (or failed): nothing to publish yet.
         return
 
-    st.divider()
-    st.subheader("Publish to the patient portal")
-
     protocol_id = st.session_state.get("coordinator_protocol_id")
+    if protocol_id:
+        st.divider()
+        render_coverage_panel(st.session_state.pipeline_result, get_guide(), protocol_id)
+        render_summary_panel(get_guide(), protocol_id)
+
     guide = get_guide()
     publish_reason = (
         "Save a protocol name in Step 1B before publishing."
         if not protocol_name
-        else publish_block_reason(
-            guide,
-            st.session_state.get("pipeline_result"),
-        )
+        else publish_block_reason(guide, st.session_state.get("pipeline_result"))
     )
 
-    publish_clicked = st.button(
-        "Publish to Patient Portal",
-        type="primary",
-        key="publish_protocol_btn",
-        disabled=publish_reason is not None,
-    )
+    restored = st.session_state.pop("_draft_restored", None)
+    if restored:
+        st.info(f"Restored your saved review for **{restored}**.")
+
+    record = published_record(protocol_id)
+    # The Publish button sits in the sticky status bar; its messages follow here.
+    with publish_col:
+        publish_clicked = st.button(
+            "Publish to Patient Portal",
+            type="primary",
+            key="publish_protocol_btn",
+            disabled=publish_reason is not None,
+            help=publish_reason,
+            use_container_width=True,
+        )
     # Only this run's attempt is reported; nothing is carried over between runs.
     attempt = publish_current_protocol() if publish_clicked else None
+    if attempt is not None and attempt[0]:
+        record = published_record(protocol_id)
+    _render_publish_status(guide, protocol_id, protocol_name, publish_reason, record, attempt)
 
-    # One status, derived from the actual published snapshot.
-    record = published_record(protocol_id)
+    st.divider()
+    with st.expander("Preview what patients will see", expanded=False):
+        preview = build_published_snapshot(guide)
+        if preview.all_items():
+            st.markdown(guide_to_markdown(preview, approved_only=True, heading_level=3))
+            st.caption(
+                "Only approved statements are shown. Pending, rejected and "
+                "unverified statements are left out."
+            )
+        else:
+            st.caption("Nothing is approved yet, so patients would see nothing.")
+
+    try:
+        events = review_store.history(protocol_id, limit=10)
+    except (sqlite3.Error, OSError):
+        events = []
+    if events:
+        with st.expander("Recent review history", expanded=False):
+            for event in events:
+                st.caption(f"{event['at']} · {event['action']} · {event['detail'] or ''}")
+
+    # Last element of the page, and only for a protocol that is really published.
+    if record is not None and st.button(
+        "Preview as a patient", key="preview_patient_btn"
+    ):
+        navigate_to_page(patient_page(protocol_id))
+        st.rerun()
+
+
+def _render_publish_status(
+    guide: Any,
+    protocol_id: Optional[str],
+    protocol_name: str,
+    publish_reason: Optional[str],
+    record: Optional[Mapping[str, Any]],
+    attempt: Optional[tuple],
+) -> None:
+    """Publication status, blockers, and Unpublish (below the sticky bar)."""
+    status = "Not published"
+    if record is not None:
+        status = (
+            "Published"
+            if published_matches_current(record, guide, protocol_name)
+            else "Published (earlier version; newer changes not published)"
+        )
+    elif review_store.publication_status(protocol_id) == review_store.WITHDRAWN:
+        status = "Unpublished (withdrawn from patients)"
+    st.caption(f"Publication status: **{status}**")
+
     if attempt is not None and not attempt[0]:
         st.error(attempt[1])
     elif record is not None and published_matches_current(record, guide, protocol_name):
@@ -1093,15 +1345,26 @@ def render_review_step() -> None:
     elif publish_reason:
         st.warning(publish_reason)
 
-    # Last element of the page, and only for a protocol that is really published.
+    unpublished_note = st.session_state.pop("_unpublish_message", None)
     if record is not None and st.button(
-        "Preview as a patient", key="preview_patient_btn"
+        "Unpublish (withdraw from patients)", key="unpublish_protocol_btn"
     ):
-        navigate_to_page(patient_page(protocol_id))
+        ok, message = unpublish_current_protocol()
+        st.session_state["_unpublish_message"] = (ok, message)
         st.rerun()
+    if unpublished_note:
+        (st.success if unpublished_note[0] else st.error)(unpublished_note[1])
 
 
 def render_coordinator_workspace() -> None:
+    try:
+        authz.require_coordinator()
+    except authz.AuthorizationError as exc:
+        st.error(str(exc))
+        return
+    if not st.session_state.get("_draft_restore_done"):
+        st.session_state["_draft_restore_done"] = True
+        restore_last_draft()
     goto = st.session_state.pop("_coord_goto", None)
     if goto in STEPS:
         st.session_state["coord_step"] = goto
@@ -1152,6 +1415,11 @@ def render_coordinator_workspace() -> None:
         render_review_step()
 
 
+def allowed_roles(account_role: str) -> tuple[str, ...]:
+    """Workspaces an account may open; coordinators may preview the patient portal."""
+    return (COORDINATOR, PATIENT) if account_role == COORDINATOR else (PATIENT,)
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Clinical Trial AI",
@@ -1159,12 +1427,24 @@ def main() -> None:
         layout="wide",
     )
     init_session_state()
+    sync_published_from_store()
     theme.inject_css()
     if collect_analysis_job() and st.session_state.get("_analysis_watched"):
         st.session_state["_analysis_just_completed"] = True
 
+    user = authz.current_user()
     role = st.session_state.get(ROLE_KEY)
-    if role == COORDINATOR:
+    # The workspace always follows the signed-in account, never a stored or navigated role.
+    if user is None or role not in allowed_roles(user["role"]):
+        role = None
+        st.session_state[ROLE_KEY] = None
+    if user is None:
+        st.session_state.pop(authz.TOKEN_KEY, None)
+
+    if role and st.session_state.get("show_profile"):
+        render_top_bar(role)
+        auth_pages.render_profile_page(user)
+    elif role == COORDINATOR:
         render_coordinator_workspace()
     elif role == PATIENT:
         render_patient_workspace()

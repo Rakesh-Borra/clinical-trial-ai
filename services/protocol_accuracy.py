@@ -11,8 +11,11 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Optional, Tuple
 
-from models.protocol_models import ProtocolAnalysis
-from services.source_verifier import normalize_text
+from models.protocol_models import PatientInfoItem, ProtocolAnalysis, SafetyInformation
+from services.source_verifier import (
+    authoritative_page_lines, authoritative_page_texts, normalize_text,
+    week_list_context,
+)
 
 
 # Reject placeholder / generic metadata even if a short substring matches.
@@ -67,6 +70,7 @@ _ITEM_FIELDS = {
     "procedures": "name",
     "visits": "visit_name",
     "safety_information": "description",
+    "patient_information": "description",
 }
 
 
@@ -208,6 +212,33 @@ def recover_labeled_metadata(
     return warnings
 
 
+def prefer_labeled_title(
+    analysis: ProtocolAnalysis,
+    protocol_text: str,
+) -> List[str]:
+    """
+    Use the explicit 'PROTOCOL TITLE:' line when the model's title differs.
+
+    A labeled title printed in the source is more reliable than a title the
+    model assembled from one chunk, so it wins. Never invents a title.
+    """
+    candidate = _original_labeled_value(
+        protocol_text, ("protocol title", "study title", "trial title")
+    )
+    if not candidate or not is_grounded_trial_title(candidate, protocol_text):
+        return []
+    if analysis.trial_title and normalize_text(analysis.trial_title) == normalize_text(candidate):
+        return []
+    previous = analysis.trial_title
+    analysis.trial_title = candidate
+    if previous is None:
+        return []
+    return [
+        f"trial_title {previous!r} replaced by the labeled source title "
+        f"{candidate!r}."
+    ]
+
+
 def ground_protocol_metadata(
     analysis: ProtocolAnalysis,
     protocol_text: str,
@@ -262,7 +293,8 @@ def repair_source_pages(
     - No matches → leave unchanged and warn as unsupported.
     """
     warnings: list[str] = []
-    page_texts = _page_texts(pdf_result)
+    # Review questions and examples are not valid evidence for a page.
+    page_texts = authoritative_page_texts(pdf_result)
 
     for category, text_field in _ITEM_FIELDS.items():
         for item in getattr(analysis, category):
@@ -284,6 +316,11 @@ def repair_source_pages(
                             f"{category}: corrected source_page for "
                             f"{statement!r} from {current} → {unique_page}."
                         )
+            elif len(matches) == 0 and category == "visits" and any(
+                week_list_context(statement, lines)
+                for lines in authoritative_page_lines(pdf_result).values()
+            ):
+                continue  # named in the protocol's written visit list
             elif len(matches) == 0:
                 warnings.append(
                     f"{category}: unsupported statement {statement!r} "
@@ -356,6 +393,212 @@ def check_eligibility_completeness(
     return warnings
 
 
+_ACTIVITY = re.compile(
+    r"\b(blood (?:draw|collection|sample)s?|venous|venipuncture|sample collection)\b",
+    re.IGNORECASE,
+)
+_TIME_TOKEN = re.compile(r"\b(day|week)\s*(-?\d+)", re.IGNORECASE)
+
+
+def _time_tokens(*texts: Optional[str]) -> set[str]:
+    return {
+        f"{m.group(1).lower()} {m.group(2)}"
+        for t in texts if t for m in _TIME_TOKEN.finditer(t)
+    }
+
+
+def _visit_key(name: str) -> str:
+    return re.sub(r"\s+visit$", "", normalize_text(name).rstrip("."))
+
+
+def link_visit_activities(analysis: ProtocolAnalysis, pdf_result: dict) -> List[str]:
+    """
+    Fold "visits" that are really a blood draw at an existing visit into it.
+
+    A model sometimes lists "Day 1 venous blood draw" as a visit of its own.
+    It is only linked when its timing equals exactly one other scheduled
+    visit and its wording is on its cited protocol page; otherwise it stays
+    as extracted and keeps failing source verification.
+    """
+    pages = authoritative_page_texts(pdf_result)
+    warnings: List[str] = []
+    visits = list(analysis.visits)
+    for activity in list(visits):
+        if not _ACTIVITY.search(activity.visit_name):
+            continue
+        tokens = _time_tokens(activity.visit_name, activity.timing)
+        if not tokens:
+            continue
+        hosts = [
+            v for v in visits
+            if v is not activity
+            and not _ACTIVITY.search(v.visit_name)
+            and tokens & _time_tokens(v.visit_name, v.timing)
+        ]
+        page_text = pages.get(activity.source_page or -1, "")
+        if len(hosts) != 1 or not _on_page_loose(activity.visit_name, page_text):
+            continue
+        host = hosts[0]
+        label = normalize_text(activity.visit_name)
+        if label not in [normalize_text(p) for p in host.procedures]:
+            host.procedures.append(activity.visit_name)
+        visits.remove(activity)
+        warnings.append(
+            f'"{activity.visit_name}" is a procedure at the "{host.visit_name}" '
+            "visit, not a separate visit; it was linked to that visit."
+        )
+    analysis.visits = visits
+    return warnings
+
+
+_LABELED_SECTIONS = (
+    ("study_purpose", re.compile(
+        r"(?:study purpose|purpose of the study|purpose|study objectives?|objectives?)",
+        re.IGNORECASE)),
+    ("consent_withdrawal", re.compile(
+        r"(?:informed consent|consent|voluntary participation|participant withdrawal|"
+        r"withdrawal|withdrawing from the study|right to withdraw|"
+        r"privacy and confidentiality|confidentiality)", re.IGNORECASE)),
+    ("safety_information", re.compile(
+        r"(?:safety monitoring|safety and monitoring|adverse event reporting)",
+        re.IGNORECASE)),
+)
+
+
+def recover_labeled_sections(analysis: ProtocolAnalysis, pdf_result: dict) -> List[str]:
+    """
+    Add protocol sentences written under a heading for study purpose, consent,
+    withdrawal or safety monitoring when extraction left them out.
+
+    Only verbatim sentences from the authoritative text of the cited page are
+    added, each with its own page; nothing is paraphrased or inferred. A page
+    title such as "016 Participant withdrawal" with no text under it adds
+    nothing.
+    """
+    from services.source_verifier import split_illustrative
+
+    def key(text: str) -> str:
+        return normalize_text(text).rstrip(". ")
+
+    # Statements the model already extracted; repeats of a new sentence on
+    # other pages are all kept so every page citation survives de-duplication.
+    known = {key(i.description) for i in analysis.patient_information} | {
+        key(s.description) for s in analysis.safety_information
+    }
+    added: dict = {}
+    for page in pdf_result.get("pages", []):
+        lines = split_illustrative(page.get("text") or "")[0].splitlines()
+        for index, line in enumerate(lines):
+            heading = re.sub(r"^\d{1,3}\s+", "", line.strip()).rstrip(":").strip()
+            category = next(
+                (c for c, pattern in _LABELED_SECTIONS if pattern.fullmatch(heading)),
+                None,
+            )
+            if category is None:
+                continue
+            block = []
+            for follow in lines[index + 1:]:
+                if not follow.strip():
+                    break
+                block.append(follow.strip())
+            for sentence in re.split(r"(?<=[.!?])\s+", " ".join(block)):
+                sentence = sentence.strip()
+                if len(sentence.split()) < 3 or key(sentence) in known:
+                    continue
+                added.setdefault(category, []).append((sentence, page["page_number"]))
+    warnings: List[str] = []
+    for category, entries in added.items():
+        for sentence, page_number in entries:
+            if category == "safety_information":
+                analysis.safety_information.append(
+                    SafetyInformation(description=sentence, source_page=page_number)
+                )
+            else:
+                analysis.patient_information.append(
+                    PatientInfoItem(category=category, description=sentence,
+                                    source_page=page_number)
+                )
+        warnings.append(
+            f"{len(entries)} {category.replace('_', ' ')} statement(s) were recovered "
+            "from labelled protocol sections the model left out."
+        )
+    return warnings
+
+
+_SINGLE_WEEK_PLURAL = re.compile(r"^Weeks(\s+\d+)$")
+_DATE_SENTENCE = re.compile(r"visit dates?\s+(?:are|is)\s+([^.]+)\.", re.IGNORECASE)
+
+
+def normalize_visit_labels(analysis: ProtocolAnalysis, pdf_result: dict) -> List[str]:
+    """
+    Fix labels split out of a written week list, without inventing visits.
+
+    "Weeks 2, 4, 8" becomes the visits "Week 2", "Week 4", "Week 8". A visit
+    whose timing is only the first word of the protocol's own sentence
+    ("Visit dates are approximate and confirmed by the study coordinator.")
+    gets the sentence's full wording, so coordinator confirmation is kept.
+    """
+    pages = {
+        page["page_number"]: re.sub(r"\s+", " ", page.get("text") or "")
+        for page in pdf_result.get("pages", [])
+    }
+    warnings: List[str] = []
+    for visit in analysis.visits:
+        label = visit.visit_name.strip()
+        fixed = _SINGLE_WEEK_PLURAL.sub(r"Week\1", label)
+        if fixed != label:
+            visit.visit_name = fixed
+        timing = (visit.timing or "").strip().rstrip(".")
+        if not timing:
+            continue
+        sentence = _DATE_SENTENCE.search(pages.get(visit.source_page, ""))
+        if not sentence:
+            continue
+        full = sentence.group(1).strip()
+        if (
+            len(full) > len(timing)
+            and full.casefold().startswith(timing.casefold())
+        ):
+            visit.timing = full
+            warnings.append(
+                f'Timing of "{visit.visit_name}" completed from the protocol '
+                f'sentence "{sentence.group(0).strip()}" on page {visit.source_page}.'
+            )
+    return warnings
+
+
+def dedupe_visits(analysis: ProtocolAnalysis) -> List[str]:
+    """Merge visits that repeat the same name and timing (or timing and name)."""
+    kept = []
+    warnings: List[str] = []
+    for visit in analysis.visits:
+        key = _visit_key(visit.visit_name)
+        timing = normalize_text(visit.timing or "")
+        twin = next(
+            (
+                k for k in kept
+                if _visit_key(k.visit_name) == key
+                and normalize_text(k.timing or "") == timing
+            ),
+            None,
+        )
+        if twin is None:
+            kept.append(visit)
+            continue
+        for procedure in visit.procedures:
+            if normalize_text(procedure) not in [normalize_text(p) for p in twin.procedures]:
+                twin.procedures.append(procedure)
+        warnings.append(f'Duplicate visit "{visit.visit_name}" was merged into one.')
+    analysis.visits = kept
+    return warnings
+
+
+def _on_page_loose(text: str, page_text: str) -> bool:
+    from services.source_verifier import _on_page
+
+    return bool(page_text) and _on_page(text, normalize_text(page_text))
+
+
 def apply_protocol_accuracy_checks(
     analysis: ProtocolAnalysis,
     pdf_result: dict,
@@ -373,9 +616,14 @@ def apply_protocol_accuracy_checks(
     warnings: list[str] = []
     # Ground first so invented LLM metadata becomes null, then recover
     # only from explicit labeled source fields into those nulls.
+    warnings.extend(prefer_labeled_title(analysis, source_text))
     warnings.extend(ground_protocol_metadata(analysis, source_text))
     warnings.extend(recover_labeled_metadata(analysis, source_text))
     warnings.extend(repair_source_pages(analysis, pdf_result))
+    warnings.extend(recover_labeled_sections(analysis, pdf_result))
+    warnings.extend(normalize_visit_labels(analysis, pdf_result))
+    warnings.extend(dedupe_visits(analysis))
+    warnings.extend(link_visit_activities(analysis, pdf_result))
     warnings.extend(
         check_eligibility_completeness(analysis, pdf_result, source_text)
     )

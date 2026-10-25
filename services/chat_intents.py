@@ -9,8 +9,9 @@ model is called and no medical or protocol fact is produced here.
 
 from __future__ import annotations
 
+import difflib
 import re
-from typing import Optional
+from typing import Iterable, Optional
 
 from models.patient_models import PatientAnswer
 
@@ -20,7 +21,7 @@ _HOW_ARE_YOU = (
     r"how are you(?: doing| today)?|how (?:is|s) it going|how are things"
 )
 _THANKS = (
-    r"thanks|thank you|thank u|thx|many thanks|thanks a lot|thanks so much"
+    r"thanks|thank you|thankyou|thanku|thank u|thx|many thanks|thanks a lot|thanks so much"
     r"|thank you so much|thank you very much|thanks again"
 )
 _BYE = r"bye|bye bye|goodbye|good bye|see you|see you later|talk to you later"
@@ -41,18 +42,57 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def social_reply_text(query: str) -> Optional[str]:
-    """Return a short friendly reply for a purely social message, else None."""
-    if not query or len(query) > _MAX_LENGTH:
-        return None
-    text = _normalize(query)
-    if not text:
-        return None
+_SOCIAL_VOCAB = (
+    "hello", "hiya", "howdy", "greetings", "thanks", "thank", "goodbye",
+    "morning", "afternoon", "evening", "good", "there", "doing", "today",
+    "later", "again", "much", "very", "many",
+)
+_ACK = (
+    r"(?:ok|okay|k|alright|great|cool|nice|sure|perfect)"
+    r"(?: (?:cool|great|thanks|thank you|thx|got it|good|nice))?"
+    r"|got it|i see|understood|sounds good|makes sense|i understand"
+)
+_HELP = r"help|help me|what can you do|what can you help with|who are you"
+_ACK_REPLY = "Great! Let me know if there's anything else you'd like to know about your study."
+_HELP_REPLY = (
+    "I can answer questions about your study using the information your study "
+    "team has approved, such as eligibility, visits, tests, risks and what "
+    "to expect. I can't give medical advice or decide whether you can join. "
+    "What would you like to know?"
+)
 
+
+def _squeeze(word: str) -> str:
+    """Collapse stretched letters: 'hellllo' -> 'hello', 'helllo' -> 'hello'."""
+    return re.sub(r"(.)\1{2,}", r"\1\1", word)
+
+
+def _canonical_social(text: str) -> str:
+    """Fix stretched or slightly misspelled words in a candidate social phrase."""
+    fixed = []
+    for word in text.split():
+        word = _squeeze(word)
+        collapsed = re.sub(r"(.)\1", r"\1", word)
+        if collapsed in {"hi", "hey", "bye", "thx"}:
+            word = collapsed
+        elif len(word) >= 4 and word not in _SOCIAL_VOCAB:
+            # Short words must match exactly, so "they" never becomes "hey".
+            near = difflib.get_close_matches(word, _SOCIAL_VOCAB, 1, 0.85)
+            if near:
+                word = near[0]
+        fixed.append(word)
+    return " ".join(fixed)
+
+
+def _match_social(text: str) -> Optional[str]:
     if re.fullmatch(_THANKS, text):
         return "You're welcome! Let me know if you have any other questions about your study."
     if re.fullmatch(_BYE, text):
         return "Goodbye! 👋 Take care, and come back any time you have questions about your study."
+    if re.fullmatch(_ACK, text):
+        return _ACK_REPLY
+    if re.fullmatch(_HELP, text):
+        return _HELP_REPLY
 
     time_match = re.fullmatch(rf"{_TIME_OF_DAY}(?: ({_HOW_ARE_YOU}))?", text)
     if time_match:
@@ -72,6 +112,66 @@ def social_reply_text(query: str) -> Optional[str]:
     return None
 
 
+def social_reply_text(query: str) -> Optional[str]:
+    """Return a short friendly reply for a purely social message, else None."""
+    if not query or len(query) > _MAX_LENGTH:
+        return None
+    text = _normalize(query)
+    if not text:
+        return None
+    return _match_social(text) or _match_social(_canonical_social(text))
+
+
+_MISSPELLINGS = {
+    "eligble": "eligible", "elegible": "eligible", "eligable": "eligible",
+    "eligibile": "eligible", "elgible": "eligible", "eligibilty": "eligibility",
+    "blud": "blood", "bloud": "blood", "bluud": "blood", "blod": "blood",
+    "vist": "visit", "visite": "visit", "vists": "visits", "visists": "visits",
+    "medcation": "medication", "medicin": "medicine", "meds": "medication",
+    "sideeffects": "side effects", "sidefects": "side effects",
+    "proceedure": "procedure", "proceedures": "procedures",
+    "excersize": "exercise", "pregnent": "pregnant", "wiithdraw": "withdraw",
+    "withdrawl": "withdrawal", "scedule": "schedule", "shedule": "schedule",
+    "benifits": "benefits", "benifit": "benefit", "rsik": "risk",
+    "rissk": "risk", "riks": "risks", "sefety": "safety", "saftey": "safety",
+    "stuudy": "study", "stdy": "study", "tial": "trial", "triel": "trial",
+}
+_QUERY_VOCAB = (
+    "eligible", "eligibility", "blood", "visit", "visits", "medication",
+    "procedure", "procedures", "schedule", "benefits", "benefit", "risks",
+    "risk", "safety", "study", "trial", "withdraw", "withdrawal", "consent",
+    "participate", "participant", "exclusion", "inclusion", "criteria",
+    "pregnant", "injection", "questionnaire", "appointment", "duration",
+    "treatment", "placebo", "confidential", "compensation", "responsibilities",
+)
+
+
+def correct_query_spelling(query: str, extra_vocab: Iterable[str] = ()) -> str:
+    """
+    Fix obvious misspellings in a patient question. Known mistakes are mapped
+    directly; other words of 5+ letters are corrected only to a close domain
+    or guide word. Words that are already known are never changed.
+    """
+    vocab = {w for w in (*_QUERY_VOCAB, *extra_vocab) if len(w) >= 5}
+    words = []
+    for token in query.split():
+        match = re.fullmatch(r"(\W*)(\w+)(\W*)", token)
+        if not match:
+            words.append(token)
+            continue
+        lead, core, trail = match.groups()
+        low = _squeeze(core.casefold())
+        if low in _MISSPELLINGS:
+            core = _MISSPELLINGS[low]
+        elif len(low) >= 5 and low not in vocab and low.isalpha():
+            near = difflib.get_close_matches(low, vocab, 1, 0.86)
+            if near:
+                core = near[0]
+        words.append(f"{lead}{core}{trail}")
+    return " ".join(words)
+
+
+
 def social_answer(query: str) -> Optional[PatientAnswer]:
     """Wrap a social reply as a PatientAnswer, or None for anything else."""
     reply = social_reply_text(query)
@@ -83,3 +183,56 @@ def social_answer(query: str) -> Optional[PatientAnswer]:
         confidence="not_applicable",
         audience="patient",
     )
+
+
+_PHRASING = (
+    (r"\bappointments?\b", lambda m: "visits" if m.group(0).endswith("s") else "visit"),
+    (r"\bcome in\b|\bcome to the clinic\b|\bgo to the clinic\b", lambda m: "visit"),
+    (r"\bquit\b|\bdrop out\b|\bopt out\b|\bleave the (?:study|trial)\b",
+     lambda m: "withdraw from the study"),
+)
+
+
+def normalize_phrasing(query: str) -> str:
+    """Map everyday wording onto the guide's vocabulary (appointment -> visit)."""
+    for pattern, repl in _PHRASING:
+        query = re.sub(pattern, repl, query, flags=re.IGNORECASE)
+    return query
+
+
+# Topics patients ask about that the guide has no section for. They are only
+# answered if an approved item mentions the topic; otherwise the patient is
+# pointed to the study team. Nothing is invented.
+_OUT_OF_SCOPE = (
+    ("withdrawing from the study", r"\b(withdraw|withdrawal|quit|drop out|opt out)\b",
+     "withdraw"),
+    ("costs, payment or insurance", r"\b(cost|costs|pay|paid|payment|compensation|reimburse\w*|insurance|free)\b",
+     "cost"),
+    ("how the procedures feel", r"\b(hurt|hurts|painful|pain|sore)\b", "hurt"),
+    ("privacy of your information", r"\b(privacy|private|confidential\w*)\b", "privacy"),
+    ("contacting the study team", r"\b(contact|phone|call|number|email|reach|emergency)\b",
+     "contact"),
+)
+
+
+def out_of_scope_topic(query: str) -> Optional[tuple[str, str]]:
+    """Return (topic label, keyword) for a known topic the guide lacks a section for."""
+    text = _normalize(query)
+    for label, pattern, keyword in _OUT_OF_SCOPE:
+        match = re.search(pattern, text)
+        if match:
+            return label, match.group(1) if match.groups() else keyword
+    return None
+
+
+def out_of_scope_reply(label: str) -> str:
+    reply = (
+        f"I don't have approved information about {label} in this guide, so "
+        "I don't want to guess. Your study team can help with that."
+    )
+    if label.startswith("contacting"):
+        reply += (
+            " If you feel unwell or have an urgent concern, please contact "
+            "your study team or your local emergency services."
+        )
+    return reply

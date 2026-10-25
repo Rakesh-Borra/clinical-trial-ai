@@ -12,6 +12,8 @@ from urllib.request import Request, urlopen
 import ollama
 from pydantic import BaseModel
 
+from services import performance
+
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash-1017"
@@ -175,6 +177,7 @@ def _ollama_completion(
         raise ModelProviderError(
             f"Ollama request failed ({type(exc).__name__})."
         ) from exc
+    performance.record_response(response)
     return _validate_response(response)
 
 

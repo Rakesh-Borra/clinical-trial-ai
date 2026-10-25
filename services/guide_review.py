@@ -18,7 +18,13 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-from agents.plain_language_agent import REJECTED_REASON, check_rewrite
+from agents.plain_language_agent import (
+    REJECTED_REASON,
+    approval_block_reason,
+    active_overrides,
+    item_cleared,
+    safety_blockers,
+)
 from models.patient_models import PatientAnswer
 from models.plain_language_models import GlossaryTerm, GuideItem, PatientGuide
 
@@ -57,18 +63,26 @@ _CROSS_REFERENCE = re.compile(
 
 
 def review_state(item: GuideItem) -> str:
+    """
+    The coordinator's decision. AI verification never changes it, but an
+    approval whose warnings are not covered by a valid override does not
+    count as a decision.
+    """
     if item.rejected:
         return REJECTED
-    if item.approved:
+    if item.approved and item_cleared(item):
         return EDITED if item.generated_by == "coordinator" else APPROVED
     return PENDING
 
 
 def state_counts(guide: PatientGuide) -> Dict[str, int]:
     counts = {key: 0 for key, _ in FILTERS}
+    counts["edited_total"] = 0
     for item in guide.all_items():
         counts[ALL] += 1
         counts[review_state(item)] += 1
+        if item.generated_by == "coordinator":
+            counts["edited_total"] += 1
     return counts
 
 
@@ -85,10 +99,21 @@ def reconsider_item(item: GuideItem) -> None:
 
 
 def edit_problems(item: GuideItem) -> List[str]:
-    """Verification problems of a coordinator-edited statement (empty if none)."""
-    if item.generated_by != "coordinator":
-        return []
-    return check_rewrite(item.original_text, item.plain_text)
+    """Safety problems of a coordinator-edited statement (never overridable)."""
+    return safety_blockers(item)
+
+
+def override_confirmation_reason(guide: PatientGuide) -> Optional[str]:
+    """Human overrides must be confirmed as a set before publishing."""
+    overrides = active_overrides(guide)
+    ids = sorted(i.item_id for i in overrides)
+    if overrides and ids != sorted(guide.overrides_confirmed):
+        return (
+            f"Cannot publish: {len(overrides)} statement(s) were approved over "
+            "an AI verification warning. Review and confirm these human "
+            "overrides before publishing."
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +123,12 @@ def edit_problems(item: GuideItem) -> List[str]:
 def decision_block_reason(guide: PatientGuide) -> Optional[str]:
     """Explain why the decisions made so far do not allow publication."""
     items = guide.all_items()
+    if not guide.generation_complete:
+        return (
+            "Cannot publish: statements are still being generated "
+            f"({len(items)} of {guide.generation_total or '?'} so far) or some "
+            "failed. Wait for generation to finish, or retry the failed ones."
+        )
     pending = sum(review_state(i) == PENDING for i in items)
     if pending:
         return (
@@ -119,6 +150,10 @@ def decision_block_reason(guide: PatientGuide) -> Optional[str]:
                 "Cannot publish: an edited statement failed verification "
                 f"({problems[0]}) Fix the wording or reject it."
             )
+
+    reason = override_confirmation_reason(guide)
+    if reason:
+        return reason
 
     for attr, label in MANDATORY_SECTIONS:
         section = getattr(guide, attr)
@@ -146,16 +181,21 @@ def decision_block_reason(guide: PatientGuide) -> Optional[str]:
 
 def build_published_snapshot(guide: PatientGuide) -> PatientGuide:
     """
-    Copy of the guide holding only approved, non-rejected statements.
+    Copy of the guide holding only approved, non-rejected, source-verified
+    statements.
 
     Rejected statements, their original protocol text and their glossary
     terms are absent from the copy, so nothing downstream can retrieve them.
     """
     snapshot = guide.model_copy(deep=True)
+    snapshot.generation_complete = guide.generation_complete
     seen: set[str] = set()
     glossary: List[GlossaryTerm] = []
     for section in snapshot.sections():
-        kept = [i for i in section.items if i.approved and not i.rejected]
+        kept = [
+            i for i in section.items
+            if i.approved and not i.rejected and item_cleared(i)
+        ]
         if len(kept) != len(section.items):
             section.items = kept
             if not kept:
@@ -171,7 +211,10 @@ def build_published_snapshot(guide: PatientGuide) -> PatientGuide:
 
 def patient_visible_guide(guide: PatientGuide) -> PatientGuide:
     """Defensive filter for anything patient-facing: never expose a rejected item."""
-    if any(item.rejected for item in guide.all_items()):
+    if any(
+        item.rejected or not item.approved or not item_cleared(item)
+        for item in guide.all_items()
+    ):
         return build_published_snapshot(guide)
     return guide
 

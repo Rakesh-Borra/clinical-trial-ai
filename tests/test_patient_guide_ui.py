@@ -5,7 +5,10 @@ Runs the real Streamlit app with Streamlit's AppTest, using a cached
 pipeline result and a fake rewriter, so no Ollama server is needed.
 """
 
+from tests.auth_helpers import sign_in_as
 import threading
+from tests.publish_helpers import exact_rows, generate_verified_guide
+from tests.publish_helpers import make_publishable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -52,7 +55,8 @@ def _pipeline_result():
     return {
         "analysis": analysis,
         "analysis_complete": True,
-        "verification": [],
+        "verification": exact_rows(analysis),
+        "completeness_audit": {"categories": {}},
         "extraction_warnings": [],
         "accuracy_warnings": [],
     }
@@ -81,6 +85,7 @@ def _eight_statement_result():
             source_page=4,
         )
     )
+    result["verification"] = exact_rows(analysis)
     return result
 
 
@@ -93,7 +98,7 @@ def _fake_rewriter(original, section, feedback=None):
 
 def _approved_guide(result=None):
     analysis = (result or _pipeline_result())["analysis"]
-    guide = generate_patient_guide(analysis, rewriter=_fake_rewriter)
+    guide = generate_verified_guide(analysis, rewriter=_fake_rewriter)
     for item in guide.all_items():
         item.approved = True
         item.rejected = False
@@ -102,7 +107,7 @@ def _approved_guide(result=None):
 
 def _prepare_review_app(result=None, guide=None):
     at = AppTest.from_file(APP_PATH, default_timeout=30)
-    at.session_state["role"] = "coordinator"
+    sign_in_as(at.session_state, "coordinator")
     at.session_state["coord_step"] = "3 · Review"
     at.session_state["coord_max_step"] = 2
     at.session_state["pipeline_result"] = result or _pipeline_result()
@@ -112,6 +117,7 @@ def _prepare_review_app(result=None, guide=None):
     }
     if guide is not None:
         at.session_state["patient_guide"] = guide
+    make_publishable("protocol-eight")
     return at.run()
 
 
@@ -174,7 +180,9 @@ def test_term_definition_answer_ignores_other_questions():
 
 def test_item_status_labels():
     item = explain_statement("Age 18.", "inclusion_criteria", rewriter=lambda o, s, f=None: o)
-    assert item_status(item) == "⏳ Waiting for approval"
+    assert item_status(item) == "⏳ Waiting for your decision"  # AI warning, no decision
+    item.source_status = "verified"
+    assert item_status(item) == "⏳ Waiting for your decision"
     item.approved = True
     assert item_status(item) == "✅ Approved"
 
@@ -184,7 +192,7 @@ def test_item_status_labels():
 # ---------------------------------------------------------------------------
 
 def _as(at, role, step=None):
-    at.session_state["role"] = role
+    sign_in_as(at.session_state, role)
     at.session_state["user_name"] = ""
     if step:
         at.session_state["coord_step"] = step
@@ -196,45 +204,69 @@ def _as(at, role, step=None):
     return at
 
 
+def _submit(at, label):
+    button = next(b for b in at.button if b.label == label)
+    button.click()
+    return at.run()
+
+
+def _ui_login(at, email, password="Passw0rd-test-123"):
+    from services import auth
+
+    stored = auth.get_user_by_email(email)
+    if stored:
+        at.radio(key="auth_login_role").set_value(stored["role"])
+    at.text_input(key="auth_login_email").set_value(email)
+    at.text_input(key="auth_login_password").set_value(password)
+    return _submit(at, "Sign in")
+
+
+def _make_account(role, email=None):
+    from services import auth
+
+    address = email or f"{role}@example.test"
+    auth.create_user(f"Test {role.title()}", address, "Passw0rd-test-123", role)
+    return address
+
+
 def test_app_opens_on_welcome_page():
     at = _app_with_analysis().run()
 
     assert not at.exception
     html_text = " ".join(str(h.value) for h in at.get("html"))
     assert "Welcome to" in html_text
-    assert "Demo navigation only" in html_text
+    assert "Sign in" in html_text
     assert any("#090B0F" in str(item.value) for item in at.get("markdown"))
-    assert [widget.key for widget in at.text_input] == ["login_name"]
-    assert at.radio(key="login_role").value == "coordinator"
+    assert {"auth_login_email", "auth_login_password"} <= {w.key for w in at.text_input}
+    assert [r.key for r in at.radio] == ["auth_login_role"]
     keys = {b.key for b in at.button}
-    assert {"home_btn", "login_continue_btn"} <= keys
-    assert len([key for key in keys if key and key.startswith("login_")]) == 1
+    assert {"home_btn", "auth_to_forgot", "auth_to_register"} <= keys
     assert not at.toggle
     # Nothing from the analysis is shown before sign-in.
     assert not at.tabs
 
 
 def test_sign_in_opens_each_workspace():
+    patient = _make_account("patient")
+    coordinator = _make_account("coordinator")
     at = _app_with_analysis().run()
-    at.radio(key="login_role").set_value("patient")
-    at = at.run()
-    at = _click(at, "login_continue_btn")
+    at = _ui_login(at, patient)
     assert at.session_state["role"] == "patient"
     assert not at.exception
-    assert any("Demo role · Patient/caregiver" in item.value for item in at.caption)
+    assert any("Patient/caregiver" in item.value for item in at.caption)
     assert {button.key for button in at.button} >= {"home_btn", "logout_btn"}
 
     at = _click(at, "logout_btn")
     assert at.session_state["role"] is None
+    assert "auth_token" not in at.session_state
 
-    at.radio(key="login_role").set_value("coordinator")
-    at = at.run()
-    at = _click(at, "login_continue_btn")
+    at = _ui_login(at, coordinator)
     assert at.session_state["role"] == "coordinator"
     assert not at.exception
     at = _click(at, "home_btn")
     assert at.session_state["role"] is None
     assert not at.exception
+    assert [b for b in at.button if b.key == "open_workspace_btn"]
 
 
 def test_coordinator_workspace_has_three_steps():
@@ -362,7 +394,7 @@ def test_protocol_name_cannot_overwrite_another_protocol():
     assert any("already saved for another protocol" in item.value for item in at.warning)
 
 
-def test_publication_requires_every_statement_to_be_approved_and_not_rejected():
+def test_publication_requires_every_statement_to_be_approved_and_not_rejected(publish_context):
     from app import can_publish_guide, publish_block_reason
 
     result = _pipeline_result()
@@ -461,7 +493,7 @@ def test_publish_eight_approved_statements_and_patient_selection():
     assert len(published["guide"].all_items()) == 8
     assert published["guide"].trial_title == "Eight Statement Study"
 
-    at.session_state["role"] = "patient"
+    sign_in_as(at.session_state, "patient")
     at = at.run()
     assert at.selectbox(key="patient_protocol_select").options == [
         "Eight Statement Study"
@@ -479,7 +511,7 @@ def test_publish_eight_approved_statements_and_patient_selection():
 
 def test_generate_review_and_publish_flow():
     at = AppTest.from_file(APP_PATH, default_timeout=30)
-    at.session_state["role"] = "coordinator"
+    sign_in_as(at.session_state, "coordinator")
     at.session_state["coordinator_protocols"] = {
         "unpublished": {"name": "Unpublished Protocol"},
     }
@@ -529,6 +561,8 @@ def test_generate_review_and_publish_flow():
         if button.key and button.key.endswith("_approve")
     )
     at = _click(at, flagged_approval)
+    make_publishable(at.session_state["coordinator_protocol_id"])
+    at = at.run()
     assert not at.button(key="publish_protocol_btn").disabled
     at = _click(at, "publish_protocol_btn")
     assert any(
@@ -538,7 +572,7 @@ def test_generate_review_and_publish_flow():
     assert protocol_id in at.session_state["published_protocols"]
 
     # The patient must select the successfully published protocol first.
-    at.session_state["role"] = "patient"
+    sign_in_as(at.session_state, "patient")
     at.run()
     assert at.selectbox(key="patient_protocol_select").value is None
     assert not any("In simple words:" in str(item.value) for item in at.get("html"))
@@ -667,17 +701,16 @@ def test_incomplete_guide_disables_approval_and_blocks_patient_view():
     assert not at.exception
     guide = at.session_state["patient_guide"]
     assert guide.analysis_complete is False
-    approve_all = next(b for b in at.button if b.key == "guide_approve_all_btn")
-    assert approve_all.disabled
+    # Approval is per statement now; only publication needs a complete analysis.
     first_item_approval = next(
         b for b in at.button if b.key and b.key.endswith("_approve")
     )
-    assert first_item_approval.disabled
+    assert not first_item_approval.disabled
     assert at.button(key="publish_protocol_btn").disabled
 
     # Even pre-approved state cannot publish incomplete content to patients.
     guide.all_items()[0].approved = True
-    at.session_state["role"] = "patient"
+    sign_in_as(at.session_state, "patient")
     at.run()
     assert not at.exception
     assert any(
@@ -761,7 +794,7 @@ def _upload(at, content=b"%PDF-1.4 protocol A", name="protocol.pdf"):
 def _reviewed_session(approve=True):
     """Upload, name, analyze, generate, and (optionally) approve the guide."""
     at = AppTest.from_file(APP_PATH, default_timeout=30)
-    at.session_state["role"] = "coordinator"
+    sign_in_as(at.session_state, "coordinator")
     at = at.run()
     at = _upload(at)
     protocol_id = at.session_state["coordinator_protocol_id"]
@@ -776,6 +809,8 @@ def _reviewed_session(approve=True):
         at = _click(at, "guide_approve_all_btn")
         for button in [b for b in at.button if b.key and b.key.endswith("_approve")]:
             at = _click(at, button.key)
+        make_publishable(protocol_id)
+        at = at.run()
     return at, analyzer, protocol_id
 
 
@@ -847,9 +882,7 @@ def test_returning_home_and_reopening_coordinator_keeps_progress():
 
     at = _click(at, "home_btn")
     assert at.session_state["role"] is None
-    at.radio(key="login_role").set_value("coordinator")
-    at = at.run()
-    at = _click(at, "login_continue_btn")
+    at = _click(at, "open_workspace_btn")
 
     assert at.session_state["role"] == "coordinator"
     assert _progress(at) == before
@@ -870,9 +903,7 @@ def test_logout_keeps_coordinator_progress_but_not_patient_access():
     assert at.session_state["published_protocols"] == {}
 
     # Role separation: a patient never sees unpublished coordinator work.
-    at.radio(key="login_role").set_value("patient")
-    at = at.run()
-    at = _click(at, "login_continue_btn")
+    at = _ui_login(at, _make_account("patient"))
     assert at.session_state["role"] == "patient"
     assert any(
         "No published clinical trial protocols are available yet." in item.value
@@ -919,7 +950,7 @@ def test_navigation_does_not_bypass_unapproved_publication_guardrail():
 
 def test_unanalyzed_upload_survives_navigation_without_reanalysis():
     at = AppTest.from_file(APP_PATH, default_timeout=30)
-    at.session_state["role"] = "coordinator"
+    sign_in_as(at.session_state, "coordinator")
     at = _upload(at.run())
     pdf_path = at.session_state["temp_pdf_path"]
     fingerprint = at.session_state["uploaded_fingerprint"]
@@ -1030,7 +1061,7 @@ class _GatedAnalyzer:
 
 def _start_gated(analyzer, content=b"%PDF-1.4 protocol A", at=None):
     at = at or AppTest.from_file(APP_PATH, default_timeout=30)
-    at.session_state["role"] = "coordinator"
+    sign_in_as(at.session_state, "coordinator")
     at = _upload(at.run(), content)
     protocol_id = at.session_state["coordinator_protocol_id"]
     at.text_input(key=f"protocol_name_{protocol_id}").set_value("Slow Study")
@@ -1194,7 +1225,7 @@ def test_replacing_pdf_discards_running_job_and_blocks_stale_result():
 
 def test_stale_job_for_other_protocol_is_never_attached():
     at = AppTest.from_file(APP_PATH, default_timeout=30)
-    at.session_state["role"] = "coordinator"
+    sign_in_as(at.session_state, "coordinator")
     at = _upload(at.run())
     stale = analysis_jobs.jobs.submit(
         lambda path: _pipeline_result(), "someone-else", "other-fingerprint", "x"
@@ -1247,9 +1278,7 @@ def test_logout_during_analysis_keeps_job_and_result_for_same_session():
     finally:
         patcher.stop()
 
-    at.radio(key="login_role").set_value("patient")
-    at = at.run()
-    at = _click(at, "login_continue_btn")
+    at = _ui_login(at, _make_account("patient"))
     # Patients never see in-progress or unpublished analysis.
     assert at.session_state["pipeline_result"] is not None
     assert not at.selectbox

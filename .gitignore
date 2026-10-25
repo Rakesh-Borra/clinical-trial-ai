@@ -16,9 +16,13 @@ __pycache__/
 # Local databases
 *.db
 *.sqlite3
+data/ctai.db*
 
 # Clinical trial documents and generated outputs
 data/protocols/*
 data/outputs/*
 !data/protocols/.gitkeep
 !data/outputs/.gitkeep
+# Optional benchmark timing logs (CTAI_BENCHMARK_LOG)
+*.benchmark.jsonl
+benchmark_logs/

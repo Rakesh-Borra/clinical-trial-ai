@@ -104,6 +104,6 @@ not for clinical decisions, not a replacement for informed consent.
 
 | Member | Contribution |
 |---|---|
-| Rakesh | Team lead · PDF processing & OCR · Protocol Analysis Agent · verification · Coordinator & Patient Q&A · Streamlit app |
+| Rakesh | Team lead · PDF processing & OCR · Protocol Analysis Agent · verification · Patient Q&A · Streamlit app |
 | Nam | Plain-Language Patient Guide agent · coordinator review & approval UI · glossary · evaluation framework & results · scrambled-PDF/OCR and context-window fixes · documentation · demo |
 | Raj | _fill in_ |
