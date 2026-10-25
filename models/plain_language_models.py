@@ -99,6 +99,9 @@ class GuideItem(BaseModel):
     override_warnings: List[str] = Field(default_factory=list)
     override_at: Optional[str] = None
 
+    # True for statements a coordinator typed in rather than the AI generated.
+    added_by_coordinator: bool = False
+
 
 _NOT_IN_DOCUMENT = (
     "The trial document did not include this information. "

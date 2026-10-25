@@ -123,7 +123,8 @@ a { color:var(--teal-text); }
 .ctai-page-head h2 { margin:0 0 .25rem; }
 
 [data-testid="stVerticalBlockBorderWrapper"] { border-radius:22px; }
-.st-key-upload_card, .st-key-doctype_card, .st-key-guide_panel, .st-key-chat_panel {
+.st-key-upload_card, .st-key-doctype_card, .st-key-guide_panel, .st-key-chat_panel,
+.st-key-home_card_add, .st-key-home_card_version, .st-key-home_card_view, [class*="st-key-protocol_row_"] {
   background:#fff; border:1px solid var(--line); border-radius:26px; padding:1.5rem 1.6rem; box-shadow:var(--shadow);
 }
 
@@ -337,6 +338,10 @@ DARK_WORKSPACE_CSS = """
 .stApp:not(:has(.st-key-landing_shell)) .ctai-page-head p {
   color:var(--body);
 }
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_add,
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_version,
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_view,
+.stApp:not(:has(.st-key-landing_shell)) [class*="st-key-protocol_row_"],
 .stApp:not(:has(.st-key-landing_shell)) .st-key-upload_card,
 .stApp:not(:has(.st-key-landing_shell)) .st-key-doctype_card,
 .stApp:not(:has(.st-key-landing_shell)) .st-key-guide_panel,
@@ -349,8 +354,17 @@ DARK_WORKSPACE_CSS = """
 .stApp:not(:has(.st-key-landing_shell)) .st-key-upload_card,
 .stApp:not(:has(.st-key-landing_shell)) .st-key-doctype_card,
 .stApp:not(:has(.st-key-landing_shell)) .st-key-guide_panel,
-.stApp:not(:has(.st-key-landing_shell)) .st-key-chat_panel {
+.stApp:not(:has(.st-key-landing_shell)) .st-key-chat_panel,
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_add,
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_version,
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_view,
+.stApp:not(:has(.st-key-landing_shell)) [class*="st-key-protocol_row_"] {
   border-radius:22px;
+}
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_add,
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_version,
+.stApp:not(:has(.st-key-landing_shell)) .st-key-home_card_view {
+  min-height:15rem;
 }
 .stApp:not(:has(.st-key-landing_shell)) .ctai-metric,
 .stApp:not(:has(.st-key-landing_shell)) .ctai-item,

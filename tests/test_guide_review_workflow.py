@@ -388,59 +388,22 @@ def _cards(at):
     return [b.key for b in at.button if b.key and b.key.endswith("_save")]
 
 
-def test_filters_replace_the_checkbox_and_show_counts():
+def test_review_page_has_no_filters_and_shows_every_statement():
     result, guide = _mixed_guide()
-    _item(guide, "between 18 and 65").approved = False
     at = _prepare_review_app(result, guide)
-    assert not at.toggle and not at.checkbox
-    labels = {b.key: b.label for b in at.button if b.key and b.key.startswith("guide_filter_")}
-    assert labels == {
-        "guide_filter_all": "All Statements (8)",
-        "guide_filter_pending": "Pending (1)",
-        "guide_filter_approved": "Approved (5)",
-        "guide_filter_edited": "Edited (1)",
-        "guide_filter_rejected": "Rejected (1)",
-    }
-    assert at.button(key="guide_filter_all").proto.type == "primary"
-    assert len(_cards(at)) == 8
+    assert not [b for b in at.button if b.key and b.key.startswith("guide_filter_")]
+    assert len(_cards(at)) == 8  # rejected statements stay visible for audit
 
 
-@pytest.mark.parametrize(
-    "key,expected", [("pending", 1), ("approved", 5), ("edited", 1), ("rejected", 1), ("all", 8)]
-)
-def test_each_filter_shows_only_its_statements(key, expected):
-    result, guide = _mixed_guide()
-    _item(guide, "between 18 and 65").approved = False
-    at = _click(_prepare_review_app(result, guide), f"guide_filter_{key}")
-    assert len(_cards(at)) == expected
-    assert at.button(key=f"guide_filter_{key}").proto.type == "primary"
-    others = [k for k in ("all", "pending", "approved", "edited", "rejected") if k != key]
-    assert all(at.button(key=f"guide_filter_{o}").proto.type == "secondary" for o in others)
-
-
-def test_counts_update_immediately_and_rejected_stay_visible_for_audit():
+def test_rejecting_updates_decisions_and_keeps_the_statement_listed():
     result = _eight_statement_result()
     guide = _approved_guide(result)
     at = _prepare_review_app(result, guide)
-    assert at.button(key="guide_filter_rejected").label == "Rejected (0)"
     at = _click(at, gk(at, 2, 0, "reject"))
-    assert at.button(key="guide_filter_rejected").label == "Rejected (1)"
-    assert at.button(key="guide_filter_approved").label == "Approved (7)"
-    at = _click(at, "guide_filter_rejected")
-    assert _cards(at) == [gk(at, 2, 0, "save")]
+    saved = at.session_state["patient_guide"]
+    assert state_counts(saved)["rejected"] == 1
+    assert _item(saved, "Follow-up").rejected
+    assert len(_cards(at)) == 8
     assert any("Follow-up" in str(h.value) for h in at.get("html"))
 
 
-def test_switching_filters_keeps_edits_and_decisions():
-    result = _eight_statement_result()
-    guide = _approved_guide(result)
-    guide.all_items()[1].approved = False
-    at = _prepare_review_app(result, guide)
-    at = _click(at, gk(at, 2, 0, "reject"))
-    for key in ("pending", "rejected", "approved", "all"):
-        at = _click(at, f"guide_filter_{key}")
-    saved = at.session_state["patient_guide"]
-    assert saved.all_items()[1].approved is False
-    assert _item(saved, "Follow-up").rejected
-    assert state_counts(saved)["rejected"] == 1
-    assert at.button(key="guide_filter_all").proto.type == "primary"
