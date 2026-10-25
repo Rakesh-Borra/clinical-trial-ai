@@ -9,6 +9,9 @@ def _offline_rewriter(original, section, feedback=None):
 def isolated_review_db(tmp_path, monkeypatch):
     """Every test gets its own empty SQLite file; data/ctai.db is never touched."""
     monkeypatch.setenv("CTAI_DB_PATH", str(tmp_path / "ctai_test.db"))
+    # A developer's shell must not change which provider or key tests see.
+    for name in ("LLM_PROVIDER", "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "OPENROUTER_MODEL"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

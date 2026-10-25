@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from typing import Any, Mapping
 
@@ -82,6 +83,11 @@ def render_coverage_panel(
                         st.rerun()
 
 
+def _text_digest(text: str) -> str:
+    """Ties the 'I have read it' tick to this exact text, so any edit resets it."""
+    return hashlib.sha256(text.strip().encode()).hexdigest()[:16]
+
+
 def _discard_summary_edit(widget_key: str, unsaved_key: str, saved: str) -> None:
     """Cancel Edits: back to the last saved draft (runs before widgets are drawn)."""
     st.session_state[widget_key] = saved
@@ -96,6 +102,9 @@ def render_summary_panel(guide: PatientGuide, protocol_id: str) -> None:
         st.error(f"The summary could not be loaded: {exc}")
         return
 
+    unsaved = False
+    approved = False
+    reviewed_key = ""
     with st.expander("Patient Summary", expanded=False):
         if record is None:
             st.info(
@@ -158,23 +167,12 @@ def render_summary_panel(guide: PatientGuide, protocol_id: str) -> None:
         for problem in validate_summary(record["draft_text"], guide):
             st.warning(problem)
 
-        block = summary_approval_block_reason(record, guide)
-        if approved:
-            if st.button("Withdraw summary approval", key="summary_unapprove_btn"):
-                review_store.withdraw_summary_approval(protocol_id)
-                st.rerun()
-        else:
-            if st.button(
-                "Approve summary", key="summary_approve_btn", type="primary",
-                disabled=block is not None or unsaved,
-            ):
-                authz.require_coordinator()
-                review_store.approve_summary(protocol_id)
-                st.rerun()
-            if unsaved:
-                st.caption("Save your changes before approving, so the approved text is the text you reviewed.")
-            elif block:
-                st.caption("Cannot approve yet: " + block)
+        reviewed_key = f"summary_reviewed_{protocol_id}_{_text_digest(record['draft_text'])}"
+        if not approved and not unsaved:
+            st.checkbox(
+                "I have read this summary and it is ready to approve",
+                key=reviewed_key,
+            )
 
         changes_tab, history_tab = st.tabs(["Changes from the AI original", "Summary history"])
         with changes_tab:
@@ -186,6 +184,29 @@ def render_summary_panel(guide: PatientGuide, protocol_id: str) -> None:
         with history_tab:
             for entry in review_store.summary_audit(protocol_id):
                 st.caption(f"{entry['at']} · {entry['action']} · {entry['detail'] or ''}")
+
+
+    block = summary_approval_block_reason(record, guide)
+    if approved:
+        st.success("Summary Approved")
+        if st.button("Withdraw summary approval", key="summary_unapprove_btn"):
+            review_store.withdraw_summary_approval(protocol_id)
+            st.rerun()
+        return
+    reviewed = bool(st.session_state.get(reviewed_key))
+    if st.button(
+        "Approve Summary", key="summary_approve_btn", type="primary",
+        disabled=block is not None or unsaved or not reviewed,
+    ):
+        authz.require_coordinator()
+        review_store.approve_summary(protocol_id)
+        st.rerun()
+    if unsaved:
+        st.caption("Save your changes before approving, so the approved text is the text you reviewed.")
+    elif block:
+        st.caption("Cannot approve yet: " + block)
+    elif not reviewed:
+        st.caption("Expand Patient Summary, read it, and tick the review box to enable approval.")
 
 
 _REQUEST_KEY = "summary_generation_requested"

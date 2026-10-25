@@ -19,14 +19,11 @@ from typing import Any, Mapping, Optional
 import streamlit as st
 
 from agents.plain_language_agent import (
-    REJECTED_REASON,
-    active_overrides,
     approve_all_unflagged,
     approve_all_with_override,
     approval_block_reason,
     approve_item,
     item_cleared,
-    overridable_items,
     count_statements,
     display_term,
     edit_item,
@@ -43,8 +40,13 @@ from agents.plain_language_agent import (
     verification_warnings,
 )
 from models.patient_models import PatientAnswer
-from models.plain_language_models import GuideItem, PatientGuide, page_label
-from services import benchmark_log, guide_jobs, review_store, version_store
+from models.plain_language_models import (
+    GuideItem,
+    PatientGuide,
+    as_patient_guide,
+    page_label,
+)
+from services import authz, benchmark_log, guide_jobs, review_store, version_store
 from services.guide_review import (
     ALL,
     APPROVED,
@@ -52,6 +54,7 @@ from services.guide_review import (
     PENDING,
     REJECTED,
     edit_problems,
+    matches_filter,
     patient_visible_guide,
     reconsider_item,
     review_state,
@@ -70,6 +73,8 @@ GUIDE_JOB_KEY = "guide_job_id"
 GUIDE_ERROR_KEY = "guide_generation_error"
 GUIDE_AUTOSTART_KEY = "guide_autostart_fingerprint"
 MANUAL_KEEP_KEY = "guide_manual_keep"
+FILTER_KEY = "guide_review_filter"
+APPROVE_ALL_CONFIRM_KEY = "guide_approve_all_pending"
 
 _TERM_DISCLAIMER = (
     "This is a general definition, not medical advice. Ask the study team "
@@ -112,30 +117,41 @@ def item_status(item: GuideItem) -> str:
 
 
 def get_guide() -> Optional[PatientGuide]:
-    return st.session_state.get(GUIDE_KEY)
+    """The working guide, re-hydrated onto the current PatientGuide class if needed."""
+    raw = st.session_state.get(GUIDE_KEY)
+    guide = as_patient_guide(raw)
+    if guide is not None and guide is not raw:
+        st.session_state[GUIDE_KEY] = guide
+    return guide
+
+
+def final_validation_reason(guide: Any) -> Optional[str]:
+    """The specific requirement a patient-facing guide fails, or None when it passes."""
+    guide = as_patient_guide(guide)
+    if guide is None:
+        return "The patient guide could not be read."
+    if guide.analysis_complete is not True:
+        return "The analysis behind this guide is not marked complete."
+    if not guide.generation_complete:
+        return "Statement generation has not finished (or some statements failed)."
+    items = guide.all_items()
+    if not items:
+        return "No approved statements would be published."
+    for item in items:
+        label = f"“{item.plain_text[:60]}” (page {item.source_page or '?'})"
+        if item.analysis_complete is not True:
+            return f"Statement {label} did not complete analysis verification."
+        if item.rejected or not item.approved:
+            return f"Statement {label} is not approved."
+        if not item_cleared(item):
+            return f"Statement {label} has unresolved verification warnings."
+    # Approve on a flagged statement records the override; no second confirm.
+    return None
 
 
 def is_fully_approved_snapshot(guide: Any) -> bool:
     """Validate that a patient-facing guide contains only complete approvals."""
-    if (
-        not isinstance(guide, PatientGuide)
-        or guide.analysis_complete is not True
-        or not guide.generation_complete
-    ):
-        return False
-    items = guide.all_items()
-    return (
-        bool(items)
-        and all(
-            item.analysis_complete is True
-            and item.approved
-            and not item.rejected
-            and item_cleared(item)
-            for item in items
-        )
-        and sorted(i.item_id for i in active_overrides(guide))
-        == sorted(guide.overrides_confirmed)
-    )
+    return final_validation_reason(guide) is None
 
 
 def clear_guide() -> None:
@@ -456,8 +472,6 @@ def _status_chip(item: GuideItem, published: Optional[set[str]] = None) -> str:
     state = review_state(item)
     if state in (APPROVED, EDITED) and published and item.plain_text in published:
         return theme.chip("Published", "lav")
-    if state in (APPROVED, EDITED) and item.override:
-        return theme.chip("Approved · coordinator override", "sun")
     if state == EDITED:
         return theme.chip("Edited · approved", "teal")
     if state == APPROVED:
@@ -470,6 +484,32 @@ def _status_chip(item: GuideItem, published: Optional[set[str]] = None) -> str:
 def _restore_text(widget_key: str, saved_text: str) -> None:
     """Discard an unsaved edit (runs as a callback, before the widget is drawn)."""
     st.session_state[widget_key] = saved_text
+
+
+def _override_audit_detail(item: GuideItem) -> str:
+    """Facts for the audit log — no fabricated approval reason."""
+    user = authz.current_user() or {}
+    actor = user.get("email") or user.get("user_id") or "coordinator"
+    warnings = item.override_warnings or verification_warnings(item)
+    return (
+        f"actor={actor} | item_id={item.item_id} | at={item.override_at or ''} "
+        f"| warnings={len(warnings)} | status=flagged_approved | {item.plain_text}"
+    )
+
+
+def _mark_override_confirmed(guide: PatientGuide, item: GuideItem) -> None:
+    """Approve is the confirmation; keep overrides_confirmed in sync for snapshots."""
+    if item.item_id and item.item_id not in guide.overrides_confirmed:
+        guide.overrides_confirmed = sorted(
+            set(guide.overrides_confirmed) | {item.item_id}
+        )
+
+
+def _clear_override_confirmation(guide: PatientGuide, item: GuideItem) -> None:
+    if item.item_id in guide.overrides_confirmed:
+        guide.overrides_confirmed = [
+            i for i in guide.overrides_confirmed if i != item.item_id
+        ]
 
 
 def _render_review_item(
@@ -493,12 +533,19 @@ def _render_review_item(
 
         state = review_state(item)
         warnings = verification_warnings(item)
-        _render_verification_details(item, key, warnings, expanded=bool(warnings) and state == PENDING)
+        flagged = bool(warnings)
+        decided = state in (APPROVED, EDITED)
+
+        if flagged and state == PENDING:
+            st.html(
+                '<div class="ctai-check bad">⚠️ AI flagged this statement. '
+                "Please review before approving.</div>"
+            )
 
         saved_text = item.plain_text
         unsaved_edit = False
 
-        with st.expander("Edit the wording"):
+        with st.expander("Edit wording"):
             new_text = st.text_area(
                 "Patient-friendly wording",
                 value=item.plain_text,
@@ -523,7 +570,10 @@ def _render_review_item(
                 elif not unsaved_edit:
                     st.session_state[f"{key}_msg"] = ("info", "No changes to save.")
                 else:
+                    guide = get_guide()
                     edit_item(item, new_text)
+                    if guide is not None:
+                        _clear_override_confirmation(guide, item)
                     pages = (st.session_state.get("pipeline_result") or {}).get(
                         "source_pages"
                     ) or {}
@@ -532,9 +582,7 @@ def _render_review_item(
                         if remaining:
                             st.session_state[f"{key}_msg"] = (
                                 "warning",
-                                "Edit saved. The AI check still has warnings: "
-                                + " ".join(remaining)
-                                + " You can approve it anyway as a recorded override.",
+                                "Edit saved. Please review the AI flag before approving.",
                             )
                         else:
                             st.session_state[f"{key}_msg"] = (
@@ -543,71 +591,41 @@ def _render_review_item(
                             )
                 st.rerun()
 
-        if item.verification != "verified" and not item.rejected:
-            if st.button("🔁 Reverify against protocol", key=f"{key}_reverify"):
-                pages = (st.session_state.get("pipeline_result") or {}).get(
-                    "source_pages"
-                ) or {}
-                problems = reverify_item(item, pages.get(str(item.source_page)))
-                if persist_review("reverified" if not problems else "reverify_failed", item.plain_text):
-                    if problems:
-                        st.session_state[f"{key}_msg"] = (
-                            "warning",
-                            "Reverification found: " + " ".join(problems),
-                        )
-                    else:
-                        st.session_state[f"{key}_msg"] = (
-                            "success",
-                            "Reverified against the protocol. You can now approve it.",
-                        )
-                st.rerun()
+        if item.source_status != "verified" and not item.rejected:
+            with st.expander("Inspect source", expanded=False):
+                _render_source_panel(item, key)
 
         block_reason = approval_block_reason(item)
-        decided = state in (APPROVED, EDITED)
-        override_reason = ""
-        override_ready = True
-        if not decided and warnings and not block_reason:
-            st.caption(
-                "Approving despite the AI warning is your decision and is "
-                "recorded in the audit history as a human override."
-            )
-            acknowledged = st.checkbox(
-                "I checked the protocol source and accept the AI verification warning",
-                key=f"{key}_ack",
-            )
-            override_reason = st.text_input(
-                "Reason for approving despite the warning",
-                key=f"{key}_reason",
-            )
-            override_ready = acknowledged and bool(override_reason.strip())
-
-        st.html('<div class="ctai-label" style="margin-top:.6rem">Is this statement accurate?</div>')
         col_yes, col_no, col_undo, _ = st.columns([1.3, 1.3, 1.3, 1.1])
 
         if decided:
             if col_yes.button("Withdraw approval", key=f"{key}_unapprove"):
+                guide = get_guide()
                 unapprove_item(item)
+                if guide is not None:
+                    _clear_override_confirmation(guide, item)
                 if persist_review("approval_withdrawn", item.plain_text):
                     st.session_state[f"{key}_msg"] = ("info", "Approval withdrawn.")
                 st.rerun()
         else:
             if col_yes.button(
-                "✅ Yes, approve",
+                "Approve",
                 key=f"{key}_approve",
                 type="primary",
-                disabled=block_reason is not None or unsaved_edit or not override_ready,
+                disabled=block_reason is not None or unsaved_edit,
             ):
                 try:
-                    approve_item(item, override_reason or None)
+                    # Approve on a flagged statement is the explicit override.
+                    approve_item(item)
                 except ValueError as exc:
                     st.session_state[f"{key}_msg"] = ("error", str(exc))
                 else:
-                    if item.override:
-                        detail = (
-                            f"{item.plain_text} | override reason: {item.override_reason}"
-                            f" | warnings: {' / '.join(item.override_warnings)}"
+                    guide = get_guide()
+                    if item.override and guide is not None:
+                        _mark_override_confirmed(guide, item)
+                        saved = persist_review(
+                            "approved_with_override", _override_audit_detail(item)
                         )
-                        saved = persist_review("approved_with_override", detail)
                     else:
                         saved = persist_review("approved", item.plain_text)
                     if saved:
@@ -620,8 +638,6 @@ def _render_review_item(
                 st.caption("Cannot approve: " + block_reason)
             elif unsaved_edit:
                 st.caption("Save your edit before approving.")
-            elif not override_ready:
-                st.caption("Tick the acknowledgement and give a reason to approve despite the warning.")
         if state == REJECTED:
             if col_undo.button("↩ Reconsider", key=f"{key}_reconsider"):
                 reconsider_item(item)
@@ -630,8 +646,11 @@ def _render_review_item(
                 st.rerun()
         else:
             with col_no.container(key=f"{key}_reject_style"):
-                if st.button("❌ No, reject", key=f"{key}_reject"):
+                if st.button("Reject", key=f"{key}_reject"):
+                    guide = get_guide()
                     reject_item(item)
+                    if guide is not None:
+                        _clear_override_confirmation(guide, item)
                     if persist_review("rejected", item.plain_text):
                         st.session_state[f"{key}_msg"] = (
                             "success",
@@ -642,12 +661,6 @@ def _render_review_item(
         message = st.session_state.pop(f"{key}_msg", None)
         if message:
             getattr(st, message[0])(message[1])
-
-        if item.terms_explained:
-            st.caption(
-                "Words explained for patients: "
-                + ", ".join(display_term(t.term) for t in item.terms_explained)
-            )
 
 
 def _recheck_guide(pipeline_result: Mapping[str, Any], guide: PatientGuide) -> int:
@@ -663,93 +676,24 @@ def _recheck_guide(pipeline_result: Mapping[str, Any], guide: PatientGuide) -> i
     return recheck_sources(guide, rows)
 
 
-def _render_verification_details(
-    item: GuideItem, key: str, warnings: list[str], expanded: bool = False
-) -> None:
-    """
-    Only problems are shown: failed or missing verification, unsupported claims
-    and overrides. Routine passes stay in the backend (results, citations and
-    audit records are unchanged).
-    """
-    if warnings:
-        st.html(
-            '<div class="ctai-check bad">⚠️ AI verification found '
-            f"{len(warnings)} warning(s). This is information; the decision is yours.</div>"
-        )
-    elif item.source_status != "verified":
-        label = {
-            "unverified": "Not verified against the cited protocol page",
-            "unchecked": "Not yet checked against the protocol source",
-        }.get(item.source_status, "Source not verified")
-        st.html(f'<div class="ctai-check bad">⚠️ {theme.e(label)}</div>')
-    for warning in warnings:
-        st.html(f'<div class="ctai-check bad">⚠️ {theme.e(warning)}</div>')
-    for note in item.review_reasons:
-        if note not in warnings and note != REJECTED_REASON and item.source_status != "verified":
-            st.caption(f"AI note: {note}")
-    if item.override:
-        st.html(
-            '<div class="ctai-check bad">Human override: '
-            f"{theme.e(item.override_reason or '')}</div>"
-        )
-    if item.source_status != "verified":
-        _render_source_panel(item, key)
-
-
 def _render_source_panel(item: GuideItem, key: str) -> None:
-    """Show the cited protocol text and why the statement failed its check."""
+    """Optional source inspection: cited page text for coordinator review."""
     pages = (st.session_state.get("pipeline_result") or {}).get("source_pages") or {}
     result = inspect_source(item, pages)
     st.html(f'<div class="ctai-label">Protocol {page_label(item) or "page ?"}</div>')
-    st.caption(result["explanation"])
-    if item.source_issue:
-        st.caption(f"Check result: {item.source_issue}")
-    if result["lines"]:
-        st.html('<div class="ctai-label">Closest lines on that page</div>')
-        for line in result["lines"]:
-            st.html(f'<div class="ctai-quote">{theme.e(line)}</div>')
     if result["page_text"]:
         st.text_area(
-            "Full text of the cited page",
+            "Cited protocol page",
             value=result["page_text"],
             height=180,
             disabled=True,
             key=f"{key}_pagetext",
         )
-    st.caption(
-        "To clear the warning, edit the wording to match the protocol and "
-        "save; or approve it as a recorded override. Statements are never "
-        "marked verified automatically."
-    )
-
-
-def _render_override_confirmation(guide: PatientGuide) -> None:
-    """Publication needs the set of human overrides confirmed explicitly."""
-    overrides = active_overrides(guide)
-    if not overrides:
-        return
-    ids = sorted(i.item_id for i in overrides)
-    st.html(
-        f'<div class="ctai-label">Human overrides to confirm ({len(overrides)})</div>'
-    )
-    for item in overrides:
-        st.caption(
-            f"“{item.plain_text}” (page {item.source_page or '?'}) — reason: "
-            f"{item.override_reason}. Warning: {' / '.join(item.override_warnings)}"
-        )
-    if ids == sorted(guide.overrides_confirmed):
-        st.success("These overrides are confirmed for publication.")
-        return
-    confirmed = st.checkbox(
-        "I confirm these statements were approved over AI verification warnings "
-        "after I checked the protocol source",
-        key="guide_overrides_ack",
-    )
-    if st.button("Confirm overrides", key="guide_overrides_confirm_btn", disabled=not confirmed):
-        guide.overrides_confirmed = ids
-        if persist_review("overrides_confirmed", f"{len(ids)} override(s)"):
-            st.session_state["guide_recheck_msg"] = "Overrides confirmed."
-        st.rerun()
+    elif result["lines"]:
+        for line in result["lines"]:
+            st.html(f'<div class="ctai-quote">{theme.e(line)}</div>')
+    else:
+        st.caption("No protocol page text is available to inspect for this statement.")
 
 
 def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
@@ -774,78 +718,98 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
         item.source_status == "unchecked" for item in guide.all_items()
     )
 
-    eligible = sum(
-        1 for item in guide.all_items()
-        if not item.approved and not item.rejected
-        and approval_block_reason(item) is None
-        and not verification_warnings(item)
-        and not item.needs_review
+    pending_items = [
+        i for i in guide.all_items()
+        if review_state(i) == PENDING and approval_block_reason(i) is None
+    ]
+    flagged_pending = sum(
+        1 for i in pending_items
+        if verification_warnings(i) or i.needs_review
     )
+    approvable = len(pending_items)
     decided = accepted + rejected
+    active_filter = st.session_state.setdefault(FILTER_KEY, ALL)
 
-    # Sticky review-status bar: live counts on the left, actions on the right.
+    # Sticky review-status bar: clickable counts on the left, Approve all on the right.
     bar = st.container(key="review_bar")
     with bar:
         stats, approve_col = st.columns([6, 2], vertical_alignment="center")
         total_text = f"{total} / {expected}" if generating else str(total)
-        cells = [
-            ("Total", total_text, ""),
-            ("Approved", accepted, "ok"),
-            ("Pending", pending, "warn" if pending else ""),
-            ("Rejected", rejected, "bad" if rejected else ""),
-            ("Edited", counts["edited_total"], ""),
-        ]
-        stats.html(
-            '<div class="ctai-rbar-stats">'
-            + "".join(
-                f'<span class="ctai-rstat {cls}">{label}<b>{value}</b></span>'
-                for label, value, cls in cells
-            )
-            + "</div>"
+        filters = (
+            (ALL, "Total", total_text),
+            (APPROVED, "Approved", accepted),
+            (PENDING, "Pending", pending),
+            (REJECTED, "Rejected", rejected),
+            (EDITED, "Edited", counts["edited_total"]),
         )
-        with approve_col.popover("Approve all", use_container_width=True):
-            if st.button(
-                f"Approve all statements that passed verification ({eligible})",
-                key="guide_approve_all_btn",
-                disabled=eligible == 0,
-                use_container_width=True,
-            ):
-                approved_now = approve_all_unflagged(guide)
-                persist_review("approved_all_checked", f"{approved_now} statement(s)")
-                st.session_state["guide_recheck_msg"] = (
-                    f"Approved {approved_now} statement(s) that passed verification. "
-                    "Statements with warnings were left for your decision."
+        with stats.container(key="guide_filters"):
+            cols = st.columns(len(filters))
+            for col, (key, label, value) in zip(cols, filters):
+                with col:
+                    selected = active_filter == key
+                    if st.button(
+                        f"{label} {value}",
+                        key=f"guide_filter_{key}",
+                        type="primary" if selected else "secondary",
+                    ):
+                        st.session_state[FILTER_KEY] = key
+                        st.rerun()
+        with approve_col:
+            if approvable == 0:
+                st.session_state.pop(APPROVE_ALL_CONFIRM_KEY, None)
+                st.button(
+                    "Approve all",
+                    key="guide_approve_all_btn",
+                    disabled=True,
+                    use_container_width=True,
                 )
-                st.rerun()
-            warned = overridable_items(guide)
-            if warned:
+            elif st.session_state.get(APPROVE_ALL_CONFIRM_KEY):
                 st.caption(
-                    f"{len(warned)} statement(s) have verification warnings. "
-                    "Approving them is your decision and is recorded as a "
-                    "human override for each one."
+                    f"Approve **{approvable}** pending"
+                    + (f" (**{flagged_pending}** AI-flagged)" if flagged_pending else "")
+                    + "?"
                 )
-                bulk_ack = st.checkbox(
-                    "I reviewed these statements against the protocol and accept their warnings",
-                    key="guide_bulk_override_ack",
-                )
-                bulk_reason = st.text_input(
-                    "Reason for approving them despite the warnings",
-                    key="guide_bulk_override_reason",
-                )
-                if st.button(
-                    f"Approve {len(warned)} with override",
-                    key="guide_bulk_override_btn",
-                    disabled=not (bulk_ack and bulk_reason.strip()),
+                confirm_col, cancel_col = st.columns(2)
+                if confirm_col.button(
+                    "Confirm",
+                    key="guide_approve_all_confirm_btn",
+                    type="primary",
                     use_container_width=True,
                 ):
-                    count = approve_all_with_override(guide, bulk_reason)
+                    checked = approve_all_unflagged(guide)
+                    overridden = approve_all_with_override(guide)
+                    user = authz.current_user() or {}
+                    actor = user.get("email") or user.get("user_id") or "coordinator"
                     persist_review(
-                        "approved_all_with_override",
-                        f"{count} statement(s) | reason: {bulk_reason.strip()}",
+                        "approved_all_checked",
+                        f"{checked} statement(s) | actor={actor}",
                     )
+                    if overridden:
+                        persist_review(
+                            "approved_all_with_override",
+                            f"{overridden} statement(s) | actor={actor} | status=flagged_approved",
+                        )
+                    st.session_state.pop(APPROVE_ALL_CONFIRM_KEY, None)
                     st.session_state["guide_recheck_msg"] = (
-                        f"Approved {count} statement(s) as human overrides."
+                        f"Approved {checked + overridden} pending statement(s)"
+                        + (f" ({overridden} with AI override)" if overridden else "")
+                        + "."
                     )
+                    st.rerun()
+                if cancel_col.button(
+                    "Cancel",
+                    key="guide_approve_all_cancel_btn",
+                    use_container_width=True,
+                ):
+                    st.session_state.pop(APPROVE_ALL_CONFIRM_KEY, None)
+                    st.rerun()
+            else:
+                if st.button(
+                    "Approve all",
+                    key="guide_approve_all_btn",
+                    use_container_width=True,
+                ):
+                    st.session_state[APPROVE_ALL_CONFIRM_KEY] = True
                     st.rerun()
         pct = max(0, min(100, int(round(100 * decided / expected)))) if expected else 0
         st.html(f'<div class="ctai-rbar-progress"><div style="width:{pct}%"></div></div>')
@@ -859,23 +823,35 @@ def render_guide_review_tab(pipeline_result: Mapping[str, Any]) -> bool:
     message = st.session_state.pop("guide_recheck_msg", None)
     if message:
         st.info(message)
-    _render_override_confirmation(guide)
 
+    visible = 0
     number = 0
     for section in guide.sections():
-        st.subheader(section.title)
-        if section.unavailable_message:
+        section_items = [
+            item for item in section.items if matches_filter(item, active_filter)
+        ]
+        if section.unavailable_message and active_filter == ALL:
             number += len(section.items)
+            st.subheader(section.title)
             st.caption(section.unavailable_message)
             continue
+        if not section_items:
+            number += len(section.items)
+            continue
+        st.subheader(section.title)
         for item in section.items:
             number += 1
+            if item not in section_items:
+                continue
+            visible += 1
             _render_review_item(
                 item,
                 key=f"guide_{item.item_id}",
                 number=number,
                 total=total,
             )
+    if visible == 0:
+        st.info("No statements match this filter.")
 
     render_add_statement(guide, pipeline_result, persist_review)
 

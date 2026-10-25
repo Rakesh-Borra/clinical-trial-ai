@@ -91,11 +91,11 @@ The patient interface (`ui/patient_view.py`) loads the published guide (`patient
 
 ## 8. Model provider
 
-`services/model_provider.py` exposes `chat_completion` (schema-constrained JSON). Ollama is the supported provider, with model name `qwen3:4b` set in the agent modules. The module also contains an opt-in OpenRouter code path (`CTAI_MODEL_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `CTAI_OPENROUTER_MODEL`) that has **not** been validated end to end; integration is planned work. Provider choice does not change the input/call limits.
+`services/model_provider.py` exposes `chat_completion` (schema-constrained JSON). Ollama is the supported provider, with model name `qwen3:4b` set in the agent modules. `LLM_PROVIDER=openrouter` switches every agent to OpenRouter (`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, `OPENROUTER_MODEL`, loaded from `.env`); it is never a silent fallback and has not yet been run live. Provider choice does not change the input/call limits.
 
 ## 9. Configuration
 
-See the environment-variable table in [`README.md`](README.md#4-workflow). Other variables: `CTAI_MODEL_TIMEOUT_SECONDS`, `CTAI_LONG_PROTOCOL_THRESHOLD_CHARS`, `CTAI_PROTOCOL_RESCUE_MAX_CHARS`, `CTAI_OPENROUTER_MODEL`, `CTAI_OPENROUTER_MAX_OUTPUT_TOKENS`.
+See the environment-variable table in [`README.md`](README.md#4-workflow). Other variables: `CTAI_MODEL_TIMEOUT_SECONDS`, `CTAI_LONG_PROTOCOL_THRESHOLD_CHARS`, `CTAI_PROTOCOL_RESCUE_MAX_CHARS`, `CTAI_OPENROUTER_MAX_OUTPUT_TOKENS`.
 
 ## 10. Safety and privacy
 

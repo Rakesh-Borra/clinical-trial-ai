@@ -1005,7 +1005,7 @@ def override_valid(item: GuideItem) -> bool:
     """A recorded override covers the current warnings (none are new)."""
     return (
         item.override
-        and bool((item.override_reason or "").strip())
+        and bool(item.override_at)
         and set(verification_warnings(item)) <= set(item.override_warnings)
     )
 
@@ -1021,8 +1021,8 @@ def approval_block_reason(item: GuideItem) -> Optional[str]:
     """
     Why this statement can never be approved, even with an override.
 
-    Verification warnings are not blockers: they need an acknowledgement and
-    a reason (see approve_item). Unsafe wording and failed generation are.
+    Verification warnings are not blockers: Approve itself records the human
+    override (see approve_item). Unsafe wording and failed generation are.
     """
     if item.generation_failed:
         return (
@@ -1039,21 +1039,19 @@ def approve_item(item: GuideItem, override_reason: Optional[str] = None) -> None
     """
     Mark one item as approved by the coordinator.
 
-    A statement with verification warnings needs an override reason; the
-    warnings are recorded with the approval. Safety blockers always refuse.
+    Approving a statement with verification warnings records an explicit human
+    override (warnings + timestamp). A written reason is optional and never
+    fabricated. Safety blockers always refuse.
     """
     reason = approval_block_reason(item)
     if reason:
         raise ValueError(reason)
     warnings = verification_warnings(item)
     if warnings:
-        if not (override_reason or "").strip():
-            raise ValueError(
-                "This statement has verification warnings. Acknowledge them "
-                "and give a reason to approve it."
-            )
         item.override = True
-        item.override_reason = override_reason.strip()
+        # Keep a caller-supplied reason when present; never invent one.
+        supplied = (override_reason or "").strip()
+        item.override_reason = supplied or None
         item.override_warnings = warnings
         item.override_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     else:
@@ -1117,23 +1115,28 @@ def overridable_items(guide: PatientGuide) -> List[GuideItem]:
     ]
 
 
-def approve_all_with_override(guide: PatientGuide, reason: str) -> int:
-    """Approve every overridable statement with one recorded reason."""
-    if not (reason or "").strip():
-        raise ValueError("A reason is required to approve over verification warnings.")
+def approve_all_with_override(
+    guide: PatientGuide, reason: Optional[str] = None
+) -> int:
+    """Approve every overridable statement; each Approve records an override."""
     items = overridable_items(guide)
+    supplied = (reason or "").strip() or None
     for item in items:
         flagged = item.needs_review and not verification_warnings(item)
-        approve_item(item, reason)
+        approve_item(item, supplied)
         if flagged:
             # Flagged rewrite that fell back to the protocol wording: the
             # bulk approval still counts as a recorded human override.
             item.override = True
-            item.override_reason = reason.strip()
+            item.override_reason = supplied
             item.override_warnings = [
                 r for r in item.review_reasons if r != REJECTED_REASON
             ]
             item.override_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if item.override and item.item_id not in guide.overrides_confirmed:
+            guide.overrides_confirmed = sorted(
+                set(guide.overrides_confirmed) | {item.item_id}
+            )
     return len(items)
 
 

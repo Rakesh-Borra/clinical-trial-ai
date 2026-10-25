@@ -19,7 +19,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import streamlit as st
 
-from models.plain_language_models import PatientGuide
+from models.plain_language_models import PatientGuide, as_patient_guide
 from models.protocol_models import ProtocolAnalysis
 from agents.guide_patient_agent import APPROVED_STATUS
 from models.protocol_models import ProtocolAnalysis
@@ -60,6 +60,7 @@ from ui.patient_guide_tab import (
     analysis_fingerprint,
     clear_guide,
     get_guide,
+    final_validation_reason,
     is_fully_approved_snapshot,
     persist_review,
     purge_item_widget_state,
@@ -771,6 +772,7 @@ def publish_block_reason(
     complete, message = analysis_completeness_message(pipeline_result)
     if not complete:
         return message
+    guide = as_patient_guide(guide)
     if guide is None:
         return "Generate patient statements before publishing."
     if guide.analysis_complete is not True:
@@ -803,7 +805,10 @@ def publish_block_reason(
     if not protocol_id:
         # Coverage overrides and the approved summary are stored per protocol.
         return "Cannot publish: the protocol has no active identifier. Upload it again."
-    snapshot = build_published_snapshot(guide)
+    try:
+        snapshot = build_published_snapshot(guide)
+    except TypeError:
+        return "The patient guide did not pass final approval validation: The patient guide could not be read."
     try:
         reason = summary_publish_block_reason(
             review_store.load_summary(protocol_id), snapshot
@@ -819,8 +824,9 @@ def publish_block_reason(
     except sqlite3.Error as exc:
         return f"Cannot publish: review data could not be read ({exc})."
 
-    if not is_fully_approved_snapshot(snapshot):
-        return "The patient guide did not pass final approval validation."
+    failed = final_validation_reason(snapshot)
+    if failed:
+        return "The patient guide did not pass final approval validation: " + failed
     return None
 
 
@@ -881,7 +887,8 @@ def published_record(protocol_id: Optional[str]) -> Optional[Mapping[str, Any]]:
 
 
 def _guide_content(guide: Any) -> Optional[dict]:
-    if not isinstance(guide, PatientGuide):
+    guide = as_patient_guide(guide)
+    if guide is None:
         return None
     content = guide.model_dump()
     content.pop("trial_title", None)
@@ -902,9 +909,13 @@ def _approved_summary_text() -> Optional[str]:
 
 def _publishable(guide: Any) -> Any:
     """What publishing this guide would save (rejected statements removed)."""
-    if not isinstance(guide, PatientGuide):
+    guide = as_patient_guide(guide)
+    if guide is None:
         return None
-    snapshot = build_published_snapshot(guide)
+    try:
+        snapshot = build_published_snapshot(guide)
+    except TypeError:
+        return None
     snapshot.summary = _approved_summary_text()
     return snapshot
 
@@ -1518,9 +1529,10 @@ def _render_missing_categories(guide: Any, protocol_id: Optional[str], version: 
         + ", ".join(missing)
         + ". You can publish anyway, but patients will not see this information."
     )
-    # The stored acknowledgment is the truth: a changed version, statement or
-    # summary makes it invalid, which clears the box.
-    st.session_state[ACK_KEY] = acknowledged
+    # Sync the checkbox from the stored acknowledgment before it is drawn so
+    # a valid ack survives Streamlit reruns, and an invalidated one clears.
+    if st.session_state.get(ACK_KEY) != acknowledged:
+        st.session_state[ACK_KEY] = acknowledged
     st.checkbox(
         ACK_TEXT,
         key=ACK_KEY,

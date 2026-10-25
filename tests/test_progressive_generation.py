@@ -308,8 +308,9 @@ def test_approve_all_approves_every_eligible_statement_only():
     assert state_counts(guide)[PENDING] == 2
     # Running it again (for newly completed statements) never touches blocked ones.
     assert approve_all_unflagged(guide) == 0
-    with pytest.raises(ValueError):
-        approve_item(items[0])
+    # Flagged statements are left for an explicit Approve (records the override).
+    approve_item(items[0])
+    assert items[0].approved and items[0].override
 
 
 def test_edited_unsupported_statement_cannot_be_approved():
@@ -319,8 +320,8 @@ def test_edited_unsupported_statement_cannot_be_approved():
     item = guide.all_items()[0]
     edit_item(item, "Something the protocol never said.")
     assert verification_warnings(item)
-    with pytest.raises(ValueError):
-        approve_item(item)  # needs a recorded override reason
+    approve_item(item)  # Approve records the override over the advisory warning
+    assert item.approved and item.override
 
 
 # --- end to end through the review page ---------------------------------------
