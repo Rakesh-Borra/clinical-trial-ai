@@ -317,6 +317,18 @@ DARK_WORKSPACE_CSS = """
   margin:0 !important;
   padding:0 !important;
 }
+/* Zero-height JS bridge iframes from ui.app_js (st.html cannot run scripts). */
+.stApp iframe[height="0"] {
+  display:none !important;
+  position:absolute !important;
+  width:0 !important;
+  height:0 !important;
+  border:0 !important;
+  margin:0 !important;
+  padding:0 !important;
+  overflow:hidden !important;
+  pointer-events:none !important;
+}
 .stApp:not(:has(.st-key-landing_shell)) .st-key-topbar .ctai-scroll-actions {
   display:flex;
   gap:.35rem;

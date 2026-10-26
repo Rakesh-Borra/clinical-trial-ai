@@ -116,7 +116,7 @@ _MIGRATIONS = [
 INVITE_HOURS = 72
 DEMO_MODE_ENV = "CTAI_DEMO_MODE"
 DEMO_CODE = "0000"
-DEMO_CODE_HINT = 'Enter "0000" as your code'
+DEMO_CODE_HINT = "Demo mode: Enter 0000 as your invitation code."
 DEMO_LABEL = "Classroom demo access only, not production security."
 INVALID_INVITE = "That invitation code is invalid, expired or already used."
 
@@ -235,8 +235,31 @@ def register_patient(full_name: str, email: str, password: str, confirm: str) ->
 
 
 def demo_mode() -> bool:
-    """Local classroom demos only: CTAI_DEMO_MODE must be exactly 'true' (any case)."""
-    return os.environ.get(DEMO_MODE_ENV, "").strip().lower() == "true"
+    """Local classroom demos only: CTAI_DEMO_MODE must be exactly 'true' (any case).
+
+    Loads the project ``.env`` (same helper as the model provider) so the flag
+    works on the registration page before any LLM call. If dotenv was cached
+    before the flag was added, re-read the project ``.env`` once. Pytest never
+    reads the developer ``.env`` (matches ``load_environment``).
+    """
+    from pathlib import Path
+
+    from services.model_provider import load_environment
+
+    load_environment()
+    if DEMO_MODE_ENV in os.environ:
+        return os.environ.get(DEMO_MODE_ENV, "").strip().lower() == "true"
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return False
+    root_env = Path(__file__).resolve().parents[1] / ".env"
+    if root_env.is_file():
+        from dotenv import dotenv_values
+
+        value = (dotenv_values(root_env).get(DEMO_MODE_ENV) or "").strip()
+        if value:
+            os.environ[DEMO_MODE_ENV] = value
+            return value.lower() == "true"
+    return False
 
 
 def register_account(
@@ -256,7 +279,13 @@ def register_account(
         raise AuthError("Enter the invitation code.")
     if password != confirm:
         raise AuthError("Passwords do not match.")
-    if demo_mode() and secrets.compare_digest(code, DEMO_CODE):
+    # compare_digest requires equal length; mismatched codes fall through to
+    # normal invitation validation (which rejects unknown codes).
+    if (
+        demo_mode()
+        and len(code) == len(DEMO_CODE)
+        and secrets.compare_digest(code, DEMO_CODE)
+    ):
         return create_user(full_name, email, password, COORDINATOR)
     return create_user(full_name, email, password, COORDINATOR, invite_code=code)
 

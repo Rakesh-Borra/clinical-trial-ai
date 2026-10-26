@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import streamlit as st
 
+from ui.app_js import run_in_app_document
+
 # Icons are drawn with CSS masks in ui/theme.py: the sanitizer strips inline SVG.
 CONTROLS_HTML = """
 <div class="ctai-chat-controls">
@@ -134,4 +136,4 @@ _SCRIPT = """
 
 
 def render_script() -> None:
-    st.html(f"<script>{_SCRIPT}</script>", unsafe_allow_javascript=True)
+    run_in_app_document(_SCRIPT)

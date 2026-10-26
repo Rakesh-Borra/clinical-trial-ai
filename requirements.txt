@@ -1,10 +1,11 @@
-streamlit>=1.40
-ollama
-pymupdf
-pydantic
-python-dotenv
-pytest
-pytesseract
-Pillow
-argon2-cffi
-
+# Pinned to versions verified for the CS697 classroom demo (Streamlit 1.50).
+# Prefer Python 3.12: python3.12 -m venv .venv
+streamlit==1.50.0
+ollama==0.6.3
+pymupdf==1.26.5
+pydantic==2.13.5
+python-dotenv==1.2.1
+pytest==8.4.2
+pytesseract==0.3.13
+Pillow==11.3.0
+argon2-cffi==25.1.0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -616,6 +617,31 @@ def test_demo_mode_does_not_apply_without_env_even_with_empty_invite(monkeypatch
         _register("coordinator", "off@example.test", "0000")
 
 
+def test_demo_mode_allows_multiple_coordinators_with_0000_on_fresh_db(monkeypatch):
+    """Fresh install in classroom demo mode: no CLI invite needed."""
+    monkeypatch.setenv("CTAI_DEMO_MODE", "true")
+    assert auth.get_user_by_email("a@example.test") is None
+    assert _register("coordinator", "a@example.test", "0000")["role"] == "coordinator"
+    assert _register("coordinator", "b@example.test", "0000")["role"] == "coordinator"
+    assert auth.authenticate("a@example.test", PASSWORD, "coordinator")["role"] == "coordinator"
+    assert auth.authenticate("b@example.test", PASSWORD, "coordinator")["role"] == "coordinator"
+
+
+def test_demo_mode_loads_environment_before_checking(monkeypatch):
+    """Registration must see CTAI_DEMO_MODE from .env before any LLM call."""
+    from services import model_provider
+
+    monkeypatch.delenv("CTAI_DEMO_MODE", raising=False)
+
+    def fake_load_environment() -> None:
+        # Mimic python-dotenv applying CTAI_DEMO_MODE=true from a local .env.
+        os.environ.setdefault("CTAI_DEMO_MODE", "true")
+
+    monkeypatch.setattr(model_provider, "load_environment", fake_load_environment)
+    assert auth.demo_mode()
+    assert _register("coordinator", "dotenv@example.test", "0000")["role"] == "coordinator"
+
+
 def _open_register(at):
     at.button(key="auth_to_register").click()
     at = at.run()
@@ -627,8 +653,8 @@ def test_register_page_demo_mode_shows_hint_and_accepts_0000(monkeypatch):
     monkeypatch.setenv("CTAI_DEMO_MODE", "true")
     at = _open_register(AppTest.from_file(APP_PATH, default_timeout=30).run())
     assert "auth_reg_invite" in {w.key for w in at.text_input}
-    assert any(auth.DEMO_CODE_HINT in m.value for m in at.markdown)
-    assert any(auth.DEMO_LABEL in c.value for c in at.caption)
+    assert any(auth.DEMO_CODE_HINT in c.value for c in at.caption)
+    assert auth.DEMO_CODE_HINT == "Demo mode: Enter 0000 as your invitation code."
     for k, v in (("auth_reg_name", "Demo Coord"), ("auth_reg_email", "demo@example.test"),
                  ("auth_reg_password", PASSWORD), ("auth_reg_confirm", PASSWORD),
                  ("auth_reg_invite", "1234")):
@@ -644,8 +670,7 @@ def test_register_page_normal_mode_shows_code_and_no_demo_hint(monkeypatch):
     monkeypatch.delenv("CTAI_DEMO_MODE", raising=False)
     at = _open_register(AppTest.from_file(APP_PATH, default_timeout=30).run())
     assert "auth_reg_invite" in {w.key for w in at.text_input}
-    assert not any(auth.DEMO_CODE_HINT in m.value for m in at.markdown)
-    assert not any(auth.DEMO_LABEL in c.value for c in at.caption)
+    assert not any(auth.DEMO_CODE_HINT in c.value for c in at.caption)
 
 
 def test_tampered_frontend_state_cannot_grant_coordinator(monkeypatch):

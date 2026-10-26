@@ -262,7 +262,8 @@ def render_guide_panel(guide: Optional[PatientGuide]) -> None:
 def _render_chat_toolbar(guide: PatientGuide) -> None:
     """New chat and history icons, laid out beside the window controls by CSS."""
     protocol_id = st.session_state.get("patient_active_protocol_id")
-    with st.container(key="chat_toolbar", horizontal=True, gap="xxsmall"):
+    # Streamlit 1.50 gap values: small|medium|large|None (None = tightest / no gap).
+    with st.container(key="chat_toolbar", horizontal=True, gap=None):
         if st.button(
             "New chat",
             key="new_chat_btn",
@@ -272,12 +273,11 @@ def _render_chat_toolbar(guide: PatientGuide) -> None:
         ):
             chat_store.new_chat(protocol_id, guide)
             st.rerun()
+        # Streamlit 1.50 popover has no type=/key= kwargs.
         with st.popover(
             "Chat history",
             icon=":material/history:",
             help="Chat history",
-            type="tertiary",
-            key="chat_history_popover",
         ):
             chats = chat_store.list_chats(protocol_id, guide)
             if not chats:

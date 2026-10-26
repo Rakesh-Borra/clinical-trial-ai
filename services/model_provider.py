@@ -30,12 +30,20 @@ class ModelProviderError(RuntimeError):
 _dotenv_loaded = False
 
 
+def _project_env_path():
+    """Absolute path to the repository ``.env`` (stable regardless of cwd)."""
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[1] / ".env"
+
+
 def load_environment() -> None:
     """
-    Load a local .env file once, without overriding real environment variables.
+    Load the project ``.env`` once, without overriding real environment variables.
 
-    Skipped under pytest so a developer's .env can never change test results.
-    The key is only ever read from the environment, never printed or logged.
+    Uses the repository root (next to ``services/``), not the process cwd, so
+    Streamlit always sees the same file. Skipped under pytest so a developer's
+    ``.env`` can never change test results. Values are never printed or logged.
     """
     global _dotenv_loaded
     if _dotenv_loaded or "PYTEST_CURRENT_TEST" in os.environ:
@@ -43,7 +51,7 @@ def load_environment() -> None:
     _dotenv_loaded = True
     from dotenv import load_dotenv
 
-    load_dotenv(override=False)
+    load_dotenv(_project_env_path(), override=False)
 
 
 def _configured_provider() -> str:

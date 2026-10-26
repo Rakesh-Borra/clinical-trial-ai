@@ -1,8 +1,9 @@
 """
 Top-bar Back to Top / Go to Bottom controls.
 
-Rendered with ``st.html`` into the same Streamlit top-bar document as Account.
-Scroll JS follows ``ui/split_pane.py`` (``unsafe_allow_javascript=True``).
+Button markup is rendered with ``st.html`` into the same Streamlit top-bar
+document as Account. Scroll behavior JS is injected via ``ui.app_js`` because
+Streamlit 1.50+ no longer executes scripts inside ``st.html``.
 
 Streamlit's scrollable surface is ``main[data-testid="stMain"]`` (overflow:auto),
 not ``window`` / ``document.scrollingElement`` / ``stAppViewContainer`` (those
@@ -15,6 +16,8 @@ from __future__ import annotations
 from typing import Optional
 
 import streamlit as st
+
+from ui.app_js import run_in_app_document
 
 _COORDINATOR = "coordinator"
 _PATIENT = "patient"
@@ -236,6 +239,6 @@ def should_show_scroll_nav(
 
 
 def render_topbar_scroll_buttons() -> None:
-    """Mount ↑/↓ in the current top-bar column (main document, no iframe)."""
+    """Mount ↑/↓ in the top-bar column and bind scroll behavior in the app document."""
     st.html(SCROLL_ACTIONS_HTML)
-    st.html(f"<script>{_SCRIPT}</script>", unsafe_allow_javascript=True)
+    run_in_app_document(_SCRIPT)

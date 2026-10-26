@@ -50,6 +50,8 @@ When a protocol changes, coordinators can compare versions, review amendments, a
 
 ## Getting Started
 
+**Requirements:** Python **3.12** preferred (3.9+ works). Dependencies are pinned for **Streamlit 1.50.0**.
+
 **1. Clone the repository**
 
 ```bash
@@ -60,23 +62,24 @@ cd clinical-trial-ai
 **2. Install dependencies**
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv   # or: python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**3. Configure the AI model**
+**3. Configure the AI model and local demo mode**
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and choose a provider:
+Edit `.env`:
 
-- **OpenRouter:** Set `LLM_PROVIDER=openrouter` and provide `OPENROUTER_API_KEY`. The default model is `openai/gpt-4.1-mini`.
-- **Ollama:** Set `LLM_PROVIDER=ollama`, install [Ollama](https://ollama.com), and run `ollama pull qwen3:4b`.
+- **OpenRouter:** `LLM_PROVIDER=openrouter` and set `OPENROUTER_API_KEY` (never commit this file).
+- **Ollama:** `LLM_PROVIDER=ollama`, install [Ollama](https://ollama.com), then `ollama pull qwen3:4b`.
+- **CS697 classroom demo registration:** set `CTAI_DEMO_MODE=true`. Coordinators can then register with invitation code **`0000`**. Leave this off for normal secure installs (use `python -m scripts.manage_users create-invite` instead).
 
-Ollama is an alternative local provider, not an automatic fallback. Optional Patient Chat answer rewording can be enabled with `CTAI_CHAT_LLM=1`.
+Ollama is an alternative local provider, not an automatic fallback. Optional Patient Chat answer rewording: `CTAI_CHAT_LLM=1`.
 
 **4. Run the application**
 
@@ -88,7 +91,9 @@ Open **http://localhost:8501** in your browser.
 
 ## Try the Demo
 
-Use the included synthetic Type 2 Diabetes protocols (`T2D-001 V1` and `V2`) to demonstrate amendment detection.
+1. With `CTAI_DEMO_MODE=true`, create a **Coordinator** account using invitation code **`0000`**, then sign in.
+2. Upload / publish using the synthetic Type 2 Diabetes protocols (`T2D-001 V1` and `V2`) to demonstrate amendment detection.
+3. Sign in as a **Patient**, open the published guide, and ask the Chat Assistant questions.
 
 The system identifies changes such as:
 

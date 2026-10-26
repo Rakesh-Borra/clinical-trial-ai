@@ -1963,11 +1963,11 @@ def render_coordinator_workspace() -> None:
     if notice:
         (st.error if notice[0] == "error" else st.warning)(notice[1])
 
+    # Streamlit 1.50 dropped ``required=``; fall back to step 1 if deselected.
     step = st.segmented_control(
         "Step",
         STEPS[: st.session_state["coord_max_step"] + 1],
         key="coord_step",
-        required=True,
         label_visibility="collapsed",
     ) or STEPS[0]
 

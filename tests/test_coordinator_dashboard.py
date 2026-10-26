@@ -23,13 +23,16 @@ NO_PROTOCOLS = "No protocols have been added yet."
 
 
 def _texts(at):
-    return " ".join(
-        [m.value for m in at.markdown]
-        + [h.value for h in at.get("html")]
-        + [c.value for c in at.caption]
-        + [i.value for i in at.info]
-        + [w.value for w in at.warning]
-    )
+    chunks = [m.value for m in at.markdown]
+    # Streamlit 1.50 AppTest may expose st.html as UnknownElement without .value.
+    for h in at.get("html"):
+        value = getattr(h, "value", None)
+        if value is not None:
+            chunks.append(str(value))
+    chunks.extend(c.value for c in at.caption)
+    chunks.extend(i.value for i in at.info)
+    chunks.extend(w.value for w in at.warning)
+    return " ".join(chunks)
 
 
 def _save(protocol_id, name, pdf, *, marker, with_pipeline=True, approved=True):

@@ -93,13 +93,12 @@ def _register_form() -> None:
         )
         invite = ""
         if role == auth.COORDINATOR:
-            if auth.demo_mode():
-                st.markdown(f"**{auth.DEMO_CODE_HINT}**")
-                st.caption(auth.DEMO_LABEL)
             invite = st.text_input(
                 "Invitation code", type="password", key="auth_reg_invite",
                 help="Issued by your administrator. Single use; it expires automatically.",
             )
+            if auth.demo_mode():
+                st.caption(auth.DEMO_CODE_HINT)
         submitted = st.form_submit_button(
             f"Create {ROLE_CHOICES[role].lower()} account", type="primary",
             use_container_width=True,

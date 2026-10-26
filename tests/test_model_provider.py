@@ -344,10 +344,11 @@ def test_openrouter_failure_is_not_retried_on_ollama_via_the_agent(monkeypatch):
 
 
 def test_dotenv_is_loaded_without_overriding_the_environment(monkeypatch, tmp_path):
-    (tmp_path / ".env").write_text("LLM_PROVIDER=openrouter\nOPENROUTER_MODEL=from/dotenv\n")
-    monkeypatch.chdir(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text("LLM_PROVIDER=openrouter\nOPENROUTER_MODEL=from/dotenv\n")
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr(model_provider, "_dotenv_loaded", False)
+    monkeypatch.setattr(model_provider, "_project_env_path", lambda: env_file)
     monkeypatch.setenv("OPENROUTER_MODEL", "from/real-env")
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     try:
@@ -359,9 +360,10 @@ def test_dotenv_is_loaded_without_overriding_the_environment(monkeypatch, tmp_pa
 
 
 def test_dotenv_is_skipped_under_pytest(monkeypatch, tmp_path):
-    (tmp_path / ".env").write_text("LLM_PROVIDER=openrouter\n")
-    monkeypatch.chdir(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text("LLM_PROVIDER=openrouter\n")
     monkeypatch.setattr(model_provider, "_dotenv_loaded", False)
+    monkeypatch.setattr(model_provider, "_project_env_path", lambda: env_file)
     model_provider.load_environment()  # PYTEST_CURRENT_TEST is set
     assert "LLM_PROVIDER" not in os.environ
 

@@ -289,7 +289,7 @@ def render_landing() -> None:
             _render_history_arrows(previous, next_)
             user = authz.current_user()
             if user:
-                with account.popover("Account", key="landing_account", use_container_width=True):
+                with account.popover("Account", use_container_width=True):
                     st.caption(f"{user['full_name']} · {ROLE_LABELS[user['role']]}")
                     if st.button("Profile", key="landing_profile_btn", use_container_width=True):
                         open_profile(user)
